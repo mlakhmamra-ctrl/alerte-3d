@@ -1,13 +1,5 @@
 # ALERTE 3D — décision collective pendant une crue (thématique ESSAIM)
 
-MVP du projet « Mondes Vivants » (5A IABD). Douze habitants du quartier fictif de Rive-Claire reçoivent des alertes,
-des rumeurs et des messages de voisins pendant une crue. Sans chef, ils doivent choisir **quand partir, par où, et vers
-quel refuge**. Quatre d'entre eux raisonnent avec un LLM local (Ollama), les huit autres suivent des règles explicites.
-Tout passe par Kafka, et la scène 3D est dans Godot.
-
-L'explication complète (lecture ESSAIM ↔ ALERTE, choix des agents, du LLM, API ou agent, architecture, exigences
-couvertes) est dans [docs/architecture.md](docs/architecture.md). Le contrat d'événements est dans
-[docs/evenements.md](docs/evenements.md).
 
 ```
  ┌──────────── Docker (docker compose up) ────────────────────────────────────┐
