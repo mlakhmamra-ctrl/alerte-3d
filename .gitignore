@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+godot/.godot/
+data/runs/*.jsonl
+!data/runs/exemple_regles_pont_ferme.jsonl
+data/batch_*.json
+data/rag_eval.md
+.env.local

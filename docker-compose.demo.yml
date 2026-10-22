@@ -1,0 +1,6 @@
+# Démo en direct, accélérée : 09:00 -> 10:00 en 12 minutes, avec les LLM (à combiner avec docker-compose.gpu.yml, voir lancer_demo.bat).
+# LLM_MIN_GAP passe à 3 minutes simulées (36 s réelles) : avec Godot ouvert (plafonné à 30 images/s), le GPU traite ~45 appels/min,
+# et 20 agents LLM en demandent alors au plus ~33. Mesuré sur RTX 5070 Laptop : latence moyenne 5,7 s (p95 11 s), soit ~30 s simulées.
+services:
+  sim:
+    environment: { TIME_SCALE: "5", LLM_MIN_GAP: "3" }

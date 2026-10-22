@@ -1,0 +1,15 @@
+# Variante de TEST : remplace Ollama par un FAUX LLM (tools/fake_ollama.py). Utile pour vérifier Kafka, la passerelle et Godot
+# sur une machine sans modèle. Les décisions « LLM » sont alors des heuristiques : ne pas les présenter comme des résultats.
+#   docker compose -f docker-compose.yml -f docker-compose.fake.yml up --build
+services:
+  ollama:
+    image: !reset null
+    build: { context: ., dockerfile: tools/Dockerfile.fake }
+    volumes: !reset []
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:11434/api/tags')"]
+      interval: 5s
+      retries: 12
+  ollama-pull:
+    image: python:3.12-slim
+    entrypoint: ["/bin/sh", "-c", "echo 'faux LLM : rien à télécharger'"]

@@ -1,0 +1,17 @@
+# Variante GPU NVIDIA : Ollama calcule sur la carte graphique (beaucoup plus rapide).
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --build     (ou : lancer.bat gpu)
+# Prérequis Windows : pilote NVIDIA récent, Docker Desktop avec le moteur WSL 2.
+# Réglages mesurés sur RTX 5070 Laptop 8 Go (7b + 0.5b, Godot ouvert) : 3 appels en parallèle + Flash Attention + cache KV en q8
+# = 111 appels/min, contre 66 avec les réglages CPU (2 en parallèle, cache f16), et 0,2 Go de mémoire vidéo en moins.
+services:
+  ollama:
+    environment: { OLLAMA_NUM_PARALLEL: "3", OLLAMA_FLASH_ATTENTION: "1", OLLAMA_KV_CACHE_TYPE: "q8_0" }
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+  sim:
+    environment: { LLM_PARALLEL: "3" }      # aligné sur OLLAMA_NUM_PARALLEL ; remplace la valeur de .env
