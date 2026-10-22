@@ -5,4 +5,19 @@ data/runs/*.jsonl
 !data/runs/exemple_regles_pont_ferme.jsonl
 data/batch_*.json
 data/rag_eval.md
+
+# Secrets et réglages locaux : jamais sur GitHub.
+# Les réglages publics sont dans .env.exemple ; .env (copie locale, où l'on peut mettre LLM_API_KEY) le remplace.
+.env
 .env.local
+.env.*.local
+*.pem
+*.key
+*.p12
+*.pfx
+*.keystore
+*.jks
+credentials*.json
+secrets/
+# Godot : les préréglages d'export peuvent contenir les mots de passe de signature
+godot/export_presets.cfg

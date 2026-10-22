@@ -46,6 +46,10 @@ puis `docker compose restart sim` pour que la simulation recharge les modèles.
 
 ## Réglages (`.env`)
 
+Les valeurs par défaut sont dans `.env.exemple` (versionné). Pour changer un réglage sur votre machine, ou pour mettre un
+**secret** comme `LLM_API_KEY`, créez un fichier `.env` avec seulement les lignes à changer : il remplace `.env.exemple`
+et il est ignoré par git (`.gitignore`), il ne part donc jamais sur GitHub.
+
 | variable                    | rôle                                                                                                                                                                                                                                                                                                            |
 | --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `N_AGENTS`                | taille de la population (**100** par défaut ; 12 = les habitants de la fiche ; au-delà, des voisins générés, en foyers de 2 à 3 personnes : contacts = leur foyer + le voisin le plus proche) — exigence C2                                                                                       |

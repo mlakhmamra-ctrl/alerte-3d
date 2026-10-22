@@ -43,7 +43,7 @@ services:
     image: ollama/ollama:latest
     depends_on: { ollama: { condition: service_healthy } }
     environment: { OLLAMA_HOST: "ollama:11434" }
-    env_file: .env
+    env_file: [ .env.exemple, { path: .env, required: false } ]   # .env (non versionné) remplace les valeurs du modèle
     entrypoint: ["/bin/sh", "-c", "ollama pull $${LLM_BIG%% *} && ollama pull $${LLM_SMALL%% *} && ollama pull $${EMBED_MODEL%% *}"]
 
   gateway:
@@ -54,7 +54,7 @@ services:
 
   sim:
     build: { context: ., dockerfile: sim/Dockerfile }
-    env_file: .env
+    env_file: [ .env.exemple, { path: .env, required: false } ]   # .env (non versionné) remplace les valeurs du modèle
     environment: { KAFKA: "kafka:9092", OLLAMA_URL: "http://ollama:11434", RUNS_DIR: /data/runs }
     volumes: [ "./data:/data" ]
     depends_on:
@@ -65,7 +65,7 @@ services:
   replay:          # rejeu sans aucun appel LLM :  docker compose --profile replay up replay
     build: { context: ., dockerfile: sim/Dockerfile }
     profiles: [ "replay" ]
-    env_file: .env
+    env_file: [ .env.exemple, { path: .env, required: false } ]   # .env (non versionné) remplace les valeurs du modèle
     environment: { KAFKA: "kafka:9092", RUNS_DIR: /data/runs }
     volumes: [ "./data:/data" ]
     depends_on: { kafka-init: { condition: service_completed_successfully }, gateway: { condition: service_started } }
