@@ -7,9 +7,13 @@ const URL := "ws://127.0.0.1:8765"
 const AgentView := preload("res://agent_view.gd")
 const WorldBuilder := preload("res://world_builder.gd")
 const KIND_COL := {"officiel": Color("4da3ff"), "rumeur": Color("ff4d5e"), "relais": Color("f5f5f5"), "observation": Color("ffd23f"),
-	"correction": Color("3ddc84"), "message": Color("53d6ff"), "verification": Color("b48cff")}
+	"correction": Color("3ddc84"), "message": Color("53d6ff"), "verification": Color("b48cff"), "famille": Color("ff9ecb")}
 const KIND_FR := {"officiel": "bulletin officiel", "rumeur": "rumeur", "relais": "relais", "observation": "observation",
-	"correction": "correction", "message": "message", "verification": "vérification"}
+	"correction": "correction", "message": "message", "verification": "vérification", "famille": "famille"}
+const CANAL_FR := {"face_a_face": "de vive voix", "telephone": "téléphone", "groupe": "groupe du quartier", "radio": "radio",
+	"sirene": "sirène", "officiel": "alerte sur mobile"}
+const SPEEDS := [1.0, 2.0, 5.0, 10.0, 20.0, 30.0, 60.0]   # ×1 = temps réel ; ×60 = 1 min simulée par seconde
+const ADMIN_PAGE := "res://../admin/index.html"     # interface de gestion des villageois (page web, même passerelle)
 const ACT_FR := {"rester": "reste", "preparer_depart": "prépare son départ", "partir": "part", "changer_itineraire": "change d'itinéraire",
 	"relayer": "relaie", "verifier": "vérifie", "corriger": "corrige"}
 
@@ -30,6 +34,13 @@ var focus := Vector3(-4, 0, 4)
 var dragging := 0
 var sel := ""
 var follow := false
+var fpv := false                    # vue à la première personne de l'habitant sélectionné (touche V)
+var fpv_look := Vector2.ZERO        # regard libre en vue subjective (clic droit + glisser) : écart de lacet, tangage
+var fpv_hidden := ""                # habitant dont on masque le corps (la caméra est dans sa tête)
+var fpv_panel: PanelContainer
+var fpv_lbl := RichTextLabel.new()
+var crue_rate := 0.0
+var network_up := true
 var cine := false
 var show_cells := true
 var t_sim := 540.0
@@ -83,7 +94,7 @@ var lines := {}
 var help_lbl := Label.new()
 var waiting := Label.new()
 var btns := {}
-var shot := {}          # capture d'écran automatique : godot --path . -- --shot=img.png --after=20 [--select=A04] [--cam=x,y,z,dist,yaw,pitch]
+var shot := {}          # capture d'écran automatique : godot --path . -- --shot=img.png --after=20 [--select=A04 [--fpv=1]] [--cam=x,y,z,dist,yaw,pitch]
 
 func _ready() -> void:
 	_environment()
@@ -285,7 +296,8 @@ func _ui() -> void:
 	rv.add_child(grid)
 	for b in [["alert", "Alerte officielle (A)", "4da3ff"], ["rumor", "Rumeur (U)", "ff4d5e"], ["bridge", "Fermer le pont (B)", "ff9f1c"], ["pause", "Pause (Espace)", "f4f1e8"],
 			["mode", "Sync/Async (M)", "b48cff"], ["scen", "Scénario (N)", "53d6ff"], ["restart", "Relancer (R)", "3ddc84"], ["cells", "Cellules (G)", "ffd23f"],
-			["cine", "Ciné (C)", "f4f1e8"], ["follow", "Suivre (F)", "f4f1e8"]]:
+			["cine", "Ciné (C)", "f4f1e8"], ["follow", "Suivre (F)", "f4f1e8"], ["fpv", "1re personne (V)", "ff9ecb"], ["network", "Couper le réseau (K)", "ff9f1c"],
+			["admin", "Villageois (H)", "3ddc84"], ["faster", "Accélérer (+)", "53d6ff"], ["slower", "Ralentir (−)", "53d6ff"]]:
 		var bt := Button.new()
 		bt.text = "●  " + b[1]
 		bt.alignment = HORIZONTAL_ALIGNMENT_LEFT
@@ -309,13 +321,19 @@ func _ui() -> void:
 	help_lbl.modulate = Color(1, 1, 1, 0.5)
 	help_lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	help_lbl.custom_minimum_size = Vector2(316, 0)
-	help_lbl.text = "Clic sur un habitant ou sa fiche : sa mémoire · clic droit + glisser : tourner · molette : zoom · ZQSD/WASD : déplacer · T : vue du dessus · Tab : habitant suivant · P : flou miniature · I : masquer les panneaux"
+	help_lbl.text = "Clic sur un habitant ou sa fiche : sa mémoire · clic droit + glisser : tourner · molette : zoom · ZQSD/WASD : déplacer · T : vue du dessus · Tab : habitant suivant · V : voir par ses yeux · + / − : accélérer, ralentir · H : gérer les villageois · P : flou miniature · I : masquer les panneaux"
 	rv.add_child(help_lbl)
 	# fiche détaillée de l'habitant sélectionné, à droite de la colonne des habitants
 	insp_panel = _panel(Vector2(324, 70), Vector2(400, 0), 0.86)
 	_rt(insp, 12)
 	insp.custom_minimum_size = Vector2(376, 0)
 	insp_panel.add_child(insp)
+	# vue subjective : ce que l'habitant sait et voit, en bas au centre (remplace la fiche détaillée)
+	fpv_panel = _panel(Vector2(560, 600), Vector2(520, 0), 0.72)
+	_rt(fpv_lbl, 13)
+	fpv_lbl.custom_minimum_size = Vector2(496, 0)
+	fpv_panel.add_child(fpv_lbl)
+	fpv_panel.visible = false
 	waiting.text = "En attente de la simulation…\nLancez « docker compose up » puis patientez (téléchargement des modèles au premier lancement)."
 	waiting.add_theme_font_size_override("font_size", 20)
 	waiting.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -360,6 +378,22 @@ func _on_button(id: String) -> void:
 				world.cells.visible = show_cells
 		"cine": cine = not cine
 		"follow": follow = not follow
+		"fpv":
+			fpv = not fpv
+			fpv_look = Vector2.ZERO
+			if fpv and (sel == "" or not agents.has(sel)) and not agents.is_empty():
+				var ids := agents.keys()
+				ids.sort()
+				sel = ids[0]
+		"network": _send({"type": "network_down"})
+		"faster", "slower":                              # vitesse du temps simulé, en cours de run
+			var cur_s: float = float(run_info.get("time_scale", 1.0))
+			var i := 0
+			while i < SPEEDS.size() - 1 and SPEEDS[i] < cur_s - 0.01:
+				i += 1
+			i = clamp(i + (1 if id == "faster" else -1), 0, SPEEDS.size() - 1)
+			_send({"type": "set_speed", "scale": SPEEDS[i]})
+		"admin": OS.shell_open(ProjectSettings.globalize_path(ADMIN_PAGE).simplify_path())
 		"text":
 			show_text = not show_text
 			txt.visible = show_text
@@ -413,6 +447,7 @@ func _process(delta: float) -> void:
 		shot.erase("shot")
 	if shot.has("select") and agents.has(shot["select"]):
 		sel = shot["select"]
+		fpv = shot.has("fpv")
 	_animate(delta)
 	_camera(delta)
 	_hud()
@@ -446,10 +481,17 @@ func _handle(txt: String) -> void:
 				v.vel = (tgt - old) / tick_dt
 				v.depth = p.get("depth", 0.0)
 				v.thinking = p.get("thinking", false)
+				v.distress = p.get("distress", false)
 				v.set_state(p["state"])
 		"flood.update":
 			level = d["level"]
+			crue_rate = float(d.get("rate", 0.0))
 			world.set_cells(d["cells"], d["level"])
+		"network.down":
+			network_up = false
+			_banner("[color=#ff9f1c][b]Réseau mobile coupé[/b][/color] : plus de téléphone ni de groupe du quartier. Restent la voix, la radio et la sirène.")
+		"message.lost":
+			_log(a, "[color=#ff9f1c]n'arrive pas à joindre[/color] %s (%s)" % [", ".join(d["to"]), d["reason"]])
 		"world.truth": truth = d
 		"bridge.closed":
 			world.set_bridge(false)
@@ -458,8 +500,11 @@ func _handle(txt: String) -> void:
 			bulletin_t = 4.0
 			waves.append({"pos": world.poste_pos + Vector3(0, 2, 0), "t": 0.0, "col": KIND_COL["officiel"]})
 			_banner("[color=#4da3ff][b]Mairie → tous[/b][/color]  « %s »" % d["text"])
+			var via: Dictionary = d.get("canaux", {})
 			for id in d.get("to", []):
-				_log(id, "[color=#4da3ff]bulletin[/color] de la mairie (%s)" % d["level"])
+				_log(id, "[color=#4da3ff]bulletin[/color] de la mairie (%s, %s)" % [d["level"], CANAL_FR.get(via.get(id, ""), "?")])
+			for id in d.get("missed", []):
+				_log(id, "[color=#ff9f1c]n'a pas reçu[/color] le bulletin de la mairie (%s)" % d["level"])
 		"rumor":
 			for id in d["targets"]:
 				if agents.has(id):
@@ -478,6 +523,12 @@ func _handle(txt: String) -> void:
 			_log(a, "[color=#ff9f1c]demi-tour[/color] (%s) → %s" % [d["reason"], refuge_names.get(d.get("refuge", ""), "?")])
 		"agent.blocked": _log(a, "[color=#ff4d5e]bloqué[/color] : %s" % d["reason"])
 		"agent.shelter": _log(a, "[color=#9b8cff]à l'abri chez soi, à l'étage[/color] : %s" % d["reason"])
+		"agent.distress": _log(a, "[color=#ff4d5e][b]en danger[/b][/color] : %s" % d["reason"])
+		"agent.distress_end": _log(a, "[color=#3ddc84]n'est plus en danger[/color]")
+		"agent.victim":
+			_log(a, "[color=#c8323a][b]victime[/b][/color] : %s" % d["reason"])
+			_banner("[color=#c8323a][b]Victime : %s[/b][/color]  %s, en danger depuis %d min" % [_name(a), d["reason"], int(d.get("minutes", 0))])
+		"house.damage": world.set_damage(d["agents"], d["level"])
 		"agent.arrive":
 			_log(a, "[color=#3ddc84]à l'abri[/color] : %s" % refuge_names.get(d["refuge"], d["refuge"]))
 			if d.has("load") and d.has("cap"):
@@ -493,7 +544,11 @@ func _handle(txt: String) -> void:
 		"metrics": metrics = d
 		"run.end":
 			metrics = d
-			_banner("[b]Fin du run[/b] · %d/%d à l'abri · contexte commun moyen %.0f %% · %d appels LLM. Appuyez sur R pour relancer." % [d["indicators"]["safe"], run_info.get("n_agents", 12), d["indicators"].get("common_context_avg", 0) * 100, d.get("calls_total", 0)])
+			var fi: Dictionary = d["indicators"]
+			_banner("[b]Fin du run[/b] · %d/%d à l'abri · %d victime(s) · %d maisons sinistrées · contexte commun moyen %.0f %% · %d appels LLM. Appuyez sur R pour relancer." % [fi["safe"], run_info.get("n_agents", 12), fi.get("victims", 0), fi.get("damage", {}).get("sinistree", 0), fi.get("common_context_avg", 0) * 100, d.get("calls_total", 0)])
+		"run.speed":
+			run_info["time_scale"] = d["scale"]
+			_banner("[color=#53d6ff]Vitesse ×%s[/color] : 1 s réelle = %s s simulées" % [str(d["scale"]), str(d["scale"])])
 		"run.paused": paused = true
 		"run.resumed": paused = false
 		"command.ack":
@@ -506,6 +561,9 @@ func _start(d: Dictionary) -> void:
 	run_info = d
 	started = true
 	paused = false
+	network_up = true
+	crue_rate = 0.0
+	fpv_hidden = ""
 	t_sim = d["t_start"]
 	t_end = d["t_end"]
 	hist.clear()
@@ -559,10 +617,11 @@ func _log(a, s: String) -> void:
 func _say(a: String, d: Dictionary) -> void:
 	var col: Color = KIND_COL.get(d.get("kind", "message"), Color.WHITE)
 	var to: Array = d.get("to", [])
+	var via: Dictionary = d.get("canaux", {})
 	for r in to:
-		if agents.has(a) and agents.has(r):
-			pulses.append({"from": agents[a], "to": agents[r], "t": 0.0, "dur": 1.4, "col": col})
-		_log(r, "[color=#53d6ff]reçoit[/color] de %s : « %s »" % [_name(a), d["text"]])
+		if agents.has(a) and agents.has(r):        # de vive voix : impulsion courte ; par le réseau : plus lente
+			pulses.append({"from": agents[a], "to": agents[r], "t": 0.0, "dur": 0.7 if via.get(r, "") == "face_a_face" else 1.4, "col": col})
+		_log(r, "[color=#53d6ff]reçoit[/color] de %s (%s) : « %s »" % [_name(a), CANAL_FR.get(via.get(r, ""), "?"), d["text"]])
 	_log(a, "[color=#53d6ff]écrit[/color] à %s : « %s »" % [", ".join(to), d["text"]])
 	if agents.has(a):
 		for v in agents.values():
@@ -571,7 +630,10 @@ func _say(a: String, d: Dictionary) -> void:
 		agents[a].say("« %s »" % d["text"].left(110), 5.0)
 	var src := "" if d.get("origin", a) == a else "  [color=#9fb0c0](source d'origine : %s, %d relais)[/color]" % [_name(d.get("origin")), int(d.get("hops", 0))]
 	var said: String = d["text"] if d["text"].length() <= 150 else d["text"].left(147) + "…"
-	_banner("[color=#%s][b]%s → %s[/b][/color] [color=#9fb0c0]%s[/color]  « %s »%s" % [col.to_html(false), _name(a), ", ".join(to.map(func(x): return _name(x))), KIND_FR.get(d.get("kind", ""), ""), said, src])
+	var chans := {}
+	for r in to:
+		chans[CANAL_FR.get(via.get(r, ""), "?")] = true
+	_banner("[color=#%s][b]%s → %s[/b][/color] [color=#9fb0c0]%s · %s[/color]  « %s »%s" % [col.to_html(false), _name(a), ", ".join(to.map(func(x): return _name(x))), KIND_FR.get(d.get("kind", ""), ""), ", ".join(chans.keys()), said, src])
 
 func _push_hist() -> void:
 	hist.append([t_sim, float(ind.get("common_context", 0)), float(ind.get("convergence_refuge", 0)), float(ind.get("safe_pct", 0))])
@@ -616,7 +678,7 @@ func _animate(delta: float) -> void:
 	for id in agents:
 		var v = agents[id]
 		v.tick(delta, world.walk_y(v.position.x, v.position.z), id == sel)
-	if sel != "" and agents.has(sel):
+	if sel != "" and agents.has(sel) and not fpv:
 		ring.visible = true
 		ring.position = agents[sel].position + Vector3(0, 0.05, 0)
 	else:
@@ -644,7 +706,7 @@ func _draw_fx() -> void:
 		fx_inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		add_child(fx_inst)
 	fx_mesh.clear_surfaces()
-	if pulses.is_empty() and waves.is_empty() and (sel == "" or not agents.has(sel)):
+	if pulses.is_empty() and waves.is_empty() and (sel == "" or not agents.has(sel) or fpv):
 		return
 	fx_mesh.surface_begin(Mesh.PRIMITIVE_LINES)
 	for p in pulses:                                  # impulsion qui voyage d'un habitant à l'autre (message)
@@ -678,12 +740,17 @@ func _draw_fx() -> void:
 			fx_mesh.surface_set_color(c)
 			fx_mesh.surface_add_vertex(wv["pos"] + Vector3(cos(a0) * r, 0, sin(a0) * r))
 			fx_mesh.surface_add_vertex(wv["pos"] + Vector3(cos(a1) * r, 0, sin(a1) * r))
-	if sel != "" and agents.has(sel):                 # réseau de l'habitant sélectionné
+	if sel != "" and agents.has(sel) and not fpv:     # réseau de l'habitant sélectionné (pas en vue subjective : traits depuis l'œil)
 		for c in ainfo[sel].get("contacts", []):
 			if agents.has(c):
 				fx_mesh.surface_set_color(Color(1, 0.88, 0.54, 0.35))
 				fx_mesh.surface_add_vertex(agents[sel].position + Vector3(0, 0.3, 0))
 				fx_mesh.surface_add_vertex(agents[c].position + Vector3(0, 0.3, 0))
+		for c in ainfo[sel].get("family", []):           # famille (même foyer) : trait rose, plus haut
+			if agents.has(c):
+				fx_mesh.surface_set_color(Color(1, 0.62, 0.8, 0.8))
+				fx_mesh.surface_add_vertex(agents[sel].position + Vector3(0, 0.7, 0))
+				fx_mesh.surface_add_vertex(agents[c].position + Vector3(0, 0.7, 0))
 	fx_mesh.surface_end()
 
 # ---------- caméra ----------
@@ -700,7 +767,10 @@ func _unhandled_input(e: InputEvent) -> void:
 		elif e.button_index == MOUSE_BUTTON_LEFT and e.pressed:
 			_pick(e.position)
 	elif e is InputEventMouseMotion and dragging > 0:
-		if dragging == 1:
+		if dragging == 1 and fpv:                      # vue subjective : tourner la tête
+			fpv_look.x -= e.relative.x * 0.005
+			fpv_look.y = clamp(fpv_look.y - e.relative.y * 0.004, -1.2, 1.2)
+		elif dragging == 1:
 			yaw -= e.relative.x * 0.005
 			pitch = clamp(pitch + e.relative.y * 0.004, 0.15, 1.45)
 		else:
@@ -719,6 +789,11 @@ func _unhandled_input(e: InputEvent) -> void:
 			KEY_G: _on_button("cells")
 			KEY_C: _on_button("cine")
 			KEY_F: _on_button("follow")
+			KEY_V: _on_button("fpv")
+			KEY_KP_ADD, KEY_PLUS, KEY_EQUAL: _on_button("faster")
+			KEY_KP_SUBTRACT, KEY_MINUS: _on_button("slower")
+			KEY_K: _on_button("network")
+			KEY_H: _on_button("admin")
 			KEY_I: _on_button("text")
 			KEY_P:                                    # flou miniature (tilt-shift) : activer / couper
 				cam_attr.dof_blur_far_enabled = not cam_attr.dof_blur_far_enabled
@@ -730,7 +805,9 @@ func _unhandled_input(e: InputEvent) -> void:
 				if not ids.is_empty():
 					var i := ids.find(sel)
 					sel = ids[(i + 1) % ids.size()]
-			KEY_ESCAPE: sel = ""
+			KEY_ESCAPE:
+				sel = ""
+				fpv = false
 
 func _pick(p: Vector2) -> void:
 	for id in pop_pos:                                # clic sur une pastille de la frise des habitants
@@ -751,6 +828,25 @@ func _pick(p: Vector2) -> void:
 	sel = best
 
 func _camera(delta: float) -> void:
+	if fpv and (sel == "" or not agents.has(sel)):
+		fpv = false
+	var hid := sel if fpv else ""                    # en vue subjective, on ne voit pas son propre corps
+	if hid != fpv_hidden:
+		if agents.has(fpv_hidden):
+			agents[fpv_hidden].visible = true
+		if agents.has(hid):
+			agents[hid].visible = false
+		fpv_hidden = hid
+	if fpv:                                           # caméra dans la tête de l'habitant, en temps réel, dans le sens de sa marche
+		var v = agents[sel]
+		var a: float = v.rotation.y + fpv_look.x
+		var dir := Vector3(sin(a) * cos(fpv_look.y), sin(fpv_look.y), cos(a) * cos(fpv_look.y))
+		var eye: Vector3 = v.position + Vector3(0, 1.62, 0) + Vector3(sin(v.rotation.y), 0, cos(v.rotation.y)) * 0.2
+		cam.fov = lerp(cam.fov, 72.0, min(1.0, delta * 6.0))
+		cam.position = cam.position.lerp(eye, min(1.0, delta * 12.0))
+		cam.look_at(cam.position + dir, Vector3.UP)
+		return
+	cam.fov = lerp(cam.fov, 38.0, min(1.0, delta * 6.0))
 	var mv := Vector3.ZERO
 	var f := Vector3(-sin(yaw), 0, -cos(yaw))
 	var r := Vector3(cos(yaw), 0, -sin(yaw))
@@ -791,13 +887,15 @@ func _hud() -> void:
 	right_panel.position.x = vs.x - right_panel.size.x - 12
 	title_panel.position.x = (324 + right_panel.position.x - title_panel.size.x) * 0.5
 	feed_panel.position.y = vs.y - feed_panel.size.y - 14
-	feed_panel.visible = not feed.is_empty()
+	feed_panel.visible = not feed.is_empty() and not fpv          # vue subjective : la fiche de l'habitant prend sa place
 	vis.queue_redraw()
 	var cnt := {}
 	for v in agents.values():
 		cnt[v.state] = cnt.get(v.state, 0) + 1
-	title_lbl.text = "[b]CRUE À RIVE-CLAIRE[/b]  [color=#8899aa]%s · scénario %s[/color]\n[color=#3ddc84]%d à l'abri[/color] · [color=#f4f1e8]%d en route[/color] · [color=#f2b134]%d se préparent[/color] · [color=#e5484d]%d bloqué(s)[/color] · [color=#9b8cff]%d à l'étage chez soi[/color] · [color=#8fa3b8]%d chez soi[/color]" % [
-		_hm(t_sim), run_info.get("scenario", "?"), cnt.get("arrived", 0), cnt.get("walking", 0), cnt.get("preparing", 0), cnt.get("blocked", 0), cnt.get("sheltered", 0), cnt.get("home", 0)]
+		if v.distress:
+			cnt["distress"] = cnt.get("distress", 0) + 1
+	title_lbl.text = "[b]CRUE À RIVE-CLAIRE[/b]  [color=#8899aa]%s · scénario %s[/color]\n[color=#3ddc84]%d à l'abri[/color] · [color=#f4f1e8]%d en route[/color] · [color=#f2b134]%d se préparent[/color] · [color=#e5484d]%d bloqué(s)[/color] · [color=#9b8cff]%d à l'étage chez soi[/color] · [color=#8fa3b8]%d chez soi[/color] · [color=#ff4d5e]%d en danger[/color] · [color=#c8323a]%d victime(s)[/color]" % [
+		_hm(t_sim), run_info.get("scenario", "?"), cnt.get("arrived", 0), cnt.get("walking", 0), cnt.get("preparing", 0), cnt.get("blocked", 0), cnt.get("sheltered", 0), cnt.get("home", 0), cnt.get("distress", 0), cnt.get("victim", 0)]
 	for id in cards:                                  # fiches des habitants, mises à jour en continu
 		var v = agents.get(id)
 		if v == null:
@@ -816,11 +914,15 @@ func _hud() -> void:
 	var n: int = run_info.get("n_agents", 12)
 	clock_lbl.text = "ALERTE · Rive-Claire   %s" % _hm(t_sim)
 	var mode: String = run_info.get("mode", "?")
-	status_lbl.text = "%s · scénario %s · mode %s%s%s\nniveau d'eau %+.2f m · %s" % [
+	var crue: Dictionary = run_info.get("crue", {})
+	status_lbl.text = "%s · scénario %s · mode %s%s%s\nniveau d'eau %+.2f m · %s\n%s · l'eau monte de %.1f cm/min · réseau mobile %s" % [
 		"connecté" if ws.get_ready_state() == WebSocketPeer.STATE_OPEN else "connexion à la passerelle…",
-		run_info.get("scenario", "?"), mode, "  · PAUSE" if paused else "", "  · REJEU" if replay else "", level, "vérité : pont %s" % str(truth.get("bridge", "?")).to_upper()]
+		run_info.get("scenario", "?"), mode + " · vitesse ×%s" % str(run_info.get("time_scale", 1)), "  · PAUSE" if paused else "", "  · REJEU" if replay else "", level, "vérité : pont %s" % str(truth.get("bridge", "?")).to_upper(),
+		"crue %s" % crue.get("type", "?"), crue_rate, "OK" if network_up else "COUPÉ"]
 	btns["pause"].text = "Reprendre (Espace)" if paused else "Pause (Espace)"
 	btns["follow"].modulate = Color("ffe08a") if follow else Color.WHITE
+	btns["fpv"].modulate = Color("ffe08a") if fpv else Color.WHITE
+	btns["network"].modulate = Color.WHITE if network_up else Color(1, 1, 1, 0.4)
 	btns["cine"].modulate = Color("ffe08a") if cine else Color.WHITE
 	if not ind.is_empty():
 		var msgs: Dictionary = ind.get("messages", {})
@@ -833,17 +935,25 @@ func _hud() -> void:
 		s += "[color=#53d6ff]Convergence[/color]  refuge %s (%s) · pont %s (%s)\n" % [_pct(ind.get("convergence_refuge")), str(ind.get("refuge_mode", "—")), _pct(ind.get("convergence_bridge")), str(ind.get("bridge_mode", "—"))]
 		s += "Messages  %d transmis · %d relayés · %d vérifiés · %d corrigés · %d rumeurs\n" % [msgs.get("message", 0) + msgs.get("observation", 0), msgs.get("relais", 0), ind.get("verified", 0), msgs.get("correction", 0), msgs.get("rumeur", 0)]
 		s += "  relais de la rumeur avant correction : %d%s\n" % [ind.get("rumor_relays_before_correction", 0), " (corrigée)" if ind.get("rumor_corrected", false) else ""]
+		var bc: Dictionary = ind.get("messages_by_canal", {})
+		s += "  canaux : %d de vive voix · %d téléphone · %d groupe · [color=#ff9f1c]%d perdus[/color]\n" % [bc.get("face_a_face", 0), bc.get("telephone", 0), bc.get("groupe", 0), ind.get("messages_lost", 0)]
 		for r in load:
 			var l: Array = load[r]
 			s += "%s  %d/%d  %s\n" % [refuge_names.get(r, r), l[0], l[1], _bar(float(l[0]) / max(1, l[1]), 12)]
 			world.set_refuge(r, int(l[0]), int(l[1]), refuge_names.get(r, r))
 		s += "Mobilité  %d bloqué(s) · %.1f min dans l'eau en moyenne\n" % [ind.get("blocked", 0), float(ind.get("wet_avg_min", 0))]
+		var dmg: Dictionary = ind.get("damage", {})
+		s += "[color=#c8323a]Conséquences[/color]  %d en danger · %d victime(s)\n" % [ind.get("distress", 0), ind.get("victims", 0)]
+		s += "  maisons : [color=#e8c547]%d dégâts légers[/color] · [color=#e8862a]%d graves[/color] · [color=#c8323a]%d sinistrées[/color] / %d\n" % [dmg.get("legers", 0), dmg.get("graves", 0), dmg.get("sinistree", 0), ind.get("houses", 0)]
 		s += "[color=#8899aa]source : événement n°%s (%s), décalage %s ms[/color]\n" % [str(ind.get("source_seq", "")), str(ind.get("source_type", "")), str(ind.get("lag_ms", ""))]
 		if not metrics.is_empty():
 			s += "[b]Coût[/b]  %d appels LLM · %d+%d tokens · %d incidents · latence moy. %d ms" % [metrics.get("calls_total", 0), metrics.get("tokens_in", 0), metrics.get("tokens_out", 0), metrics.get("incidents", 0), metrics.get("avg_latency_ms", 0)]
 		ind_lbl.text = s
-	insp_panel.visible = sel != "" and ainfo.has(sel)
-	if sel != "" and ainfo.has(sel):
+	insp_panel.visible = sel != "" and ainfo.has(sel) and not fpv
+	fpv_panel.visible = fpv and ainfo.has(sel)
+	if fpv_panel.visible:
+		_fpv_hud(vs)
+	if sel != "" and ainfo.has(sel) and not fpv:
 		var i: Dictionary = ainfo[sel]
 		var b: Dictionary = beliefs.get(sel, {})
 		var th: Dictionary = last_think.get(sel, {})
@@ -853,11 +963,15 @@ func _hud() -> void:
 			return "[color=#3ddc84]✓[/color]" if (k == "refuge" and (val in truth.get("refuges", []) or v.state == "arrived")) or (k != "refuge" and val == truth.get(k)) else "[color=#ff6b6b]✗[/color]"
 		var s := "[b]%s · %s[/b]  [color=#8899aa]%s[/color]\n%s\n" % [sel, i.get("name", ""), eng, i.get("situation", "")]
 		s += "Confiance officiel %d/5 · voisins %d/5 · mobilité %.2f · seuil %d\nContacts : %s\n" % [i["trust_off"], i["trust_nb"], i["mob"], i.get("threshold", 0), ", ".join(i.get("contacts", []))]
+		var fam: Array = i.get("family", [])
+		s += "[color=#ff9ecb]Famille %s[/color] : %s%s\nCanaux : %s\n" % [i.get("famille", "?"), ", ".join(fam.map(func(x): return _name(x))) if not fam.is_empty() else "vit seul(e)",
+			(" · à charge : " + ", ".join(i.get("dependants", []))) if not i.get("dependants", []).is_empty() else "",
+			", ".join(["de vive voix"] + i.get("canaux", []).map(func(x): return CANAL_FR.get(x, x)))]
 		s += "État : [b]%s[/b] · risque perçu %d/100 %s\n" % [AgentView.STATE_FR.get(v.state, v.state), b.get("risk", 0), _bar(float(b.get("risk", 0)) / 100.0, 10)]
 		if not b.is_empty():
 			s += "Croit : pont %s %s · refuge %s %s · danger %s %s\n" % [b["bridge"], ok.call("bridge", b["bridge"]), b["refuge"], ok.call("refuge", b["refuge"]), "oui" if b["danger"] else "non", ok.call("danger", b["danger"])]
 		if not th.is_empty():
-			s += "\n[b]Dernière décision[/b] (%s%s) : %s\n[i]« %s »[/i]\n" % [th.get("decider", ""), (", %d ms" % th["latency_ms"]) if th.get("latency_ms") != null else "", ACT_FR.get(th["action"], th["action"]), th["why"]]
+			s += "\n[b]Dernière décision[/b] (%s%s%s) : %s\n[i]« %s »[/i]\n" % [th.get("decider", ""), (", API %s" % th["api"]) if th.get("api") != null else "", (", %d ms" % th["latency_ms"]) if th.get("latency_ms") != null else "", ACT_FR.get(th["action"], th["action"]), th["why"]]
 			var rr: Array = th.get("retrieved", [])
 			if not rr.is_empty():
 				s += "[color=#8899aa]Retrouvé (RAG) :[/color]\n"
@@ -868,6 +982,26 @@ func _hud() -> void:
 		for x in j.slice(max(0, j.size() - 9)):
 			s += x + "\n"
 		insp.text = s
+
+func _fpv_hud(vs: Vector2) -> void:              # vue subjective : ce que l'habitant voit et sait, en temps réel
+	var i: Dictionary = ainfo[sel]
+	var v = agents[sel]
+	var b: Dictionary = beliefs.get(sel, {})
+	var th: Dictionary = last_think.get(sel, {})
+	fpv_panel.size.y = 0
+	fpv_panel.position = Vector2((vs.x - fpv_panel.size.x) * 0.5, vs.y - fpv_panel.size.y - 14.0)
+	var st: Color = AgentView.STATE_COL.get(v.state, Color.WHITE)
+	var s := "[b]Par les yeux de %s · %s[/b]  [color=#8899aa]%s · clic droit + glisser : regarder · Tab : suivant · V : quitter[/color]\n" % [sel, i.get("name", ""), _hm(t_sim)]
+	s += "[color=#%s]%s[/color] · %d cm d'eau à ses pieds · l'eau monte de %.1f cm/min · risque perçu %d/100%s\n" % [st.to_html(false), AgentView.STATE_FR.get(v.state, v.state),
+		int(v.depth * 100), crue_rate, b.get("risk", 0), "" if network_up else " · [color=#ff9f1c]pas de réseau[/color]"]
+	if not b.is_empty():
+		s += "Croit : pont %s · refuge %s · danger %s\n" % [b["bridge"], refuge_names.get(b["refuge"], b["refuge"]), "oui" if b["danger"] else "non"]
+	if not th.is_empty():
+		s += "[i]« %s »[/i]\n" % th["why"]
+	var j: Array = journal.get(sel, [])
+	for x in j.slice(max(0, j.size() - 4)):
+		s += x + "\n"
+	fpv_lbl.text = s.strip_edges()
 
 # ---------- repères visuels sans texte ----------
 var pop_pos := {}

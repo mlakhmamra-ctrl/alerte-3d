@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gestion des villageois</title>
+<!-- ALERTE 3D — interface de gestion des villageois. Ouvrir ce fichier dans un navigateur (ou touche H dans Godot).
+     Elle se connecte à la passerelle (ws://127.0.0.1:8765), lit les habitants du run en cours (run.start),
+     et renvoie les réglages modifiés par la commande set_profiles : la simulation les enregistre dans data/villageois.json
+     et relance un run avec eux. -->
+<style>
+:root { --bg: #0f141b; --panel: #171e27; --line: #263140; --text: #e6edf3; --muted: #8899aa; --accent: #3ddc84; --warn: #ff9f1c; --pink: #ff9ecb; --bad: #ff4d5e; }
+@media (prefers-color-scheme: light) { :root:not([data-theme="dark"]) { --bg: #f4f6f8; --panel: #fff; --line: #d8dee6; --text: #1b2430; --muted: #5d6b7a; --accent: #1f9d5a; --warn: #c26a00; --pink: #c2457f; --bad: #c62b3a; } }
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+header { position: sticky; top: 0; z-index: 2; background: var(--panel); border-bottom: 1px solid var(--line); padding: 10px 16px; display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+h1 { font-size: 17px; margin: 0 12px 0 0; }
+#status { color: var(--muted); font-size: 13px; }
+#status.ok::before { content: "● "; color: var(--accent); }
+#status.ko::before { content: "● "; color: var(--bad); }
+main { padding: 12px 16px 40px; }
+section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px; margin-bottom: 12px; }
+h2 { font-size: 14px; margin: 0 0 8px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.row { display: flex; flex-wrap: wrap; gap: 14px; align-items: end; }
+label.f { display: flex; flex-direction: column; gap: 3px; font-size: 12px; color: var(--muted); }
+input, select { background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 4px 6px; font: inherit; }
+input[type=number] { width: 64px; }
+input.wide { width: 100%; min-width: 220px; }
+button { background: transparent; color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 6px 12px; font: inherit; cursor: pointer; }
+button:hover { border-color: var(--muted); }
+button.primary { background: var(--accent); color: #062312; border-color: var(--accent); font-weight: 600; }
+button:disabled { opacity: .45; cursor: default; }
+.table-wrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 13px; }
+th, td { border-bottom: 1px solid var(--line); padding: 4px 6px; text-align: left; vertical-align: top; white-space: nowrap; }
+th { position: sticky; top: 0; background: var(--panel); color: var(--muted); font-weight: 500; cursor: pointer; }
+td.sit input { min-width: 260px; }
+tr.changed td:first-child { box-shadow: inset 3px 0 0 var(--warn); }
+.fam { color: var(--pink); }
+.muted { color: var(--muted); }
+.chk { display: inline-flex; gap: 2px; align-items: center; margin-right: 6px; }
+#filter { min-width: 220px; }
+.note { font-size: 12px; color: var(--muted); margin: 6px 0 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Gestion des villageois</h1>
+  <span id="status" class="ko">connexion à la passerelle…</span>
+  <span style="flex:1"></span>
+  <button id="export">Exporter (JSON)</button>
+  <label class="chk"><button id="importBtn" type="button">Importer…</button><input id="import" type="file" accept="application/json" hidden></label>
+  <button id="reset" title="Revenir aux habitants de la fiche et aux réglages de .env">Réinitialiser</button>
+  <button id="apply" class="primary" disabled>Appliquer et relancer</button>
+</header>
+<main>
+  <section>
+    <h2>Monde et crue</h2>
+    <div class="row">
+      <label class="f">Type de crue <select id="crue"></select></label>
+      <label class="f">Scénario <select id="scenario"><option value="pont_ferme">pont_ferme (crue forte, pont fermé à 09:20)</option><option value="pont_ouvert">pont_ouvert (crue modérée, rumeur fausse)</option></select></label>
+      <label class="f">Panne du réseau mobile <input id="panne" placeholder="none ou 09:40" style="width:110px"></label>
+      <label class="f">Mode <select id="mode"><option>async</option><option>sync</option></select></label>
+      <label class="f">Vitesse (change tout de suite) <select id="vitesse"><option value="1">×1 temps réel (1 h)</option><option value="2">×2 (30 min)</option><option value="5">×5 (12 min)</option><option value="10">×10 (6 min)</option><option value="20">×20 (3 min)</option><option value="30">×30 (2 min)</option><option value="60">×60 (1 min)</option></select></label>
+    </div>
+    <p class="note" id="crueNote"></p>
+  </section>
+  <section>
+    <h2>Ajouter des habitants en lot</h2>
+    <div class="row">
+      <label class="f">Nombre <input id="lNombre" type="number" min="1" value="20"></label>
+      <label class="f">Nom du lot <input id="lNom" placeholder="Lot 1" style="width:120px"></label>
+      <label class="f">Comportement copié de <select id="lModele"><option value="mix">tous les profils, à tour de rôle</option></select></label>
+      <label class="f">Moteur <select id="lMoteur"><option value="rule">rule (règles)</option><option value="small">small (LLM compact)</option><option value="big">big (LLM grand)</option><option value="mix">mélange</option></select></label>
+      <label class="f">% LLM (mélange) <input id="lPart" type="number" min="0" max="100" value="20"></label>
+      <label class="f">Personnes par foyer <input id="lFoyer" type="number" min="1" max="6" value="3"></label>
+      <label class="f">Quartier <select id="lQuartier"><option value="tous">tous</option><option value="centre">centre (fiche)</option><option value="ouest">ouest</option><option value="est">est</option></select></label>
+      <label class="f">Canaux <span id="lCanaux"></span></label>
+      <label class="f">À charge <input id="lDeps" placeholder="enfant, parent âgé" style="width:140px"></label>
+      <button id="lAdd">Ajouter le lot</button>
+    </div>
+    <div id="lots" class="note"></div>
+  </section>
+  <section>
+    <h2>Habitants <span id="count" class="muted"></span></h2>
+    <div class="row" style="margin-bottom:8px">
+      <span class="muted" style="font-size:12px">Modifier en lot :</span>
+      <select id="bCol"></select>
+      <span id="bVal"></span>
+      <button id="bApply">Appliquer aux habitants affichés</button>
+    </div>
+    <div class="row" style="margin-bottom:8px">
+      <input id="filter" placeholder="Filtrer : nom, id, famille, moteur…">
+      <span class="muted" style="font-size:12px">Moteur : rule = règles, big / small = LLM. Confiance 1–5. Mobilité 1,00 = 1,2 m/s. Famille : même code = même foyer (ils partent ensemble).</span>
+    </div>
+    <div class="table-wrap"><table id="tbl"><thead></thead><tbody></tbody></table></div>
+  </section>
+</main>
+<script>
+const URL = "ws://127.0.0.1:8765";
+const CANAUX = ["telephone", "groupe", "radio"];
+const CANAL_FR = { telephone: "tél.", groupe: "groupe", radio: "radio" };
+// colonnes éditables : [clé, titre, type]
+const COLS = [["name", "Nom", "text"], ["engine", "Moteur", "engine"], ["famille", "Famille", "text"], ["dependants", "À charge", "list"],
+  ["canaux", "Canaux", "canaux"], ["trust_off", "Conf. mairie", "int"], ["trust_nb", "Conf. voisins", "int"], ["mob", "Mobilité", "float"],
+  ["threshold", "Seuil", "int"], ["prep", "Prépa (min)", "int"], ["needs_conf", "Confirm.", "int"], ["relay", "Relais", "float"],
+  ["verifier", "Vérifie", "bool"], ["local_obs", "Veut voir", "bool"], ["no_stairs", "Sans escalier", "bool"], ["knows_detour", "Connaît détour", "bool"],
+  ["contacts", "Contacts", "list"], ["situation", "Situation", "text"]];
+let ws, base = {}, cur = {}, runInfo = null, sortKey = "id", lots = [];
+const byId = (a, b) => a.localeCompare(b, "fr", { numeric: true });       // A10 < A100
+const $ = id => document.getElementById(id);
+
+function connect() {
+  ws = new WebSocket(URL);
+  ws.onopen = () => setStatus(true, "connecté — en attente du run en cours…");
+  ws.onclose = () => { setStatus(false, "passerelle injoignable (docker compose up ?) — nouvel essai…"); $("apply").disabled = true; setTimeout(connect, 2000); };
+  ws.onmessage = m => { let e; try { e = JSON.parse(m.data); } catch { return; } if (e.type === "run.start") load(e.data); };
+}
+function setStatus(ok, t) { const s = $("status"); s.className = ok ? "ok" : "ko"; s.textContent = t; }
+
+function load(d) {
+  runInfo = d; base = {}; cur = {};
+  for (const a of d.agents) {
+    const p = {}; for (const [k] of COLS) p[k] = structuredClone(a[k] ?? (k === "engine" ? a.kind : null));
+    base[a.id] = p; cur[a.id] = structuredClone(p);
+  }
+  const cs = $("crue"); cs.innerHTML = "";
+  for (const [k, nom] of Object.entries(d.crues || { rapide: "crue rapide" })) cs.add(new Option(`${k} — ${nom}`, k));
+  cs.value = d.crue?.type || "rapide"; $("scenario").value = d.scenario; $("mode").value = d.mode; $("panne").value = d.panne_reseau || "none";
+  const v = $("vitesse"); if (![...v.options].some(o => +o.value === d.time_scale)) v.add(new Option(`×${d.time_scale}`, d.time_scale)); v.value = String(d.time_scale);
+  $("crueNote").textContent = d.crue ? `Run en cours : ${d.crue.nom}. Débordement à ${hm(d.crue.t_bank)}, pic à ${hm(d.crue.t_peak)} (${d.crue.peak} m), montée jusqu'à ${d.crue.rate_max_cm_min} cm/min.` : "";
+  setStatus(true, `run ${d.seed ?? ""} · ${d.n_agents} habitants · ${(d.llm_agents || []).length} LLM${d.custom ? " · réglages personnalisés actifs" : ""}`);
+  lots = structuredClone(d.lots || []); renderLots();
+  $("apply").disabled = false; render();
+}
+function renderLots() {
+  const n = runInfo ? runInfo.n_agents : 0, gen = lots.reduce((s, l) => s + (+l.nombre || 0), 0), cur_lots = (runInfo?.lots || []).reduce((s, l) => s + (+l.nombre || 0), 0);
+  const w = $("lots"); w.innerHTML = "";
+  if (!lots.length) { w.textContent = "Aucun lot. Les lots s'ajoutent après les habitants de .env (N_AGENTS) et s'appliquent au prochain run (Appliquer et relancer)."; return; }
+  lots.forEach((l, i) => {
+    const s = el("div"); s.textContent = `${l.nom || "Lot " + (i + 1)} : ${l.nombre} habitants · modèle ${l.modele} · moteur ${l.moteur}${l.moteur === "mix" ? ` (${l.part_llm} % LLM)` : ""} · foyers de ${l.taille_foyer} · ${l.quartier} · canaux ${l.canaux.join(", ") || "voix seule"}${l.dependants.length ? " · à charge : " + l.dependants.join(", ") : ""} `;
+    const x = el("button", { textContent: "retirer" }); x.onclick = () => { lots.splice(i, 1); renderLots(); }; s.append(x); w.append(s);
+  });
+  w.append(el("div", { textContent: `Prochain run : ${n - cur_lots + gen} habitants (maximum ${runInfo?.max_agents ?? 400}).` }));
+}
+const hm = t => `${String(Math.floor(t / 60)).padStart(2, "0")}:${String(Math.floor(t % 60)).padStart(2, "0")}`;
+
+function render() {
+  const head = $("tbl").tHead; head.innerHTML = "";
+  const hr = head.insertRow(); hr.insertCell().outerHTML = `<th data-k="id">Id</th>`;
+  for (const [k, t] of COLS) hr.insertCell().outerHTML = `<th data-k="${k}">${t}</th>`;
+  hr.querySelectorAll("th").forEach(th => th.onclick = () => { sortKey = th.dataset.k; render(); });
+  const body = $("tbl").tBodies[0]; body.innerHTML = "";
+  const q = $("filter").value.trim().toLowerCase();
+  const ids = Object.keys(cur).filter(id => !q || (id + " " + JSON.stringify(cur[id])).toLowerCase().includes(q))
+    .sort((a, b) => sortKey === "id" ? byId(a, b) : String(cur[a][sortKey]).localeCompare(String(cur[b][sortKey]), "fr", { numeric: true }) || byId(a, b));
+  shown = ids;
+  $("count").textContent = `(${ids.length} / ${Object.keys(cur).length})`;
+  for (const id of ids) {
+    const tr = body.insertRow(); tr.dataset.id = id; tr.insertCell().textContent = id;
+    for (const [k, , typ] of COLS) tr.insertCell().append(editor(id, k, typ));
+    tr.cells[COLS.length].className = "sit"; mark(tr);
+  }
+}
+function editor(id, k, typ) {
+  const v = cur[id][k], set = x => { cur[id][k] = x; mark($("tbl").querySelector(`tr[data-id="${id}"]`)); };
+  if (typ === "bool") { const i = el("input", { type: "checkbox", checked: !!v }); i.onchange = () => set(i.checked); return i; }
+  if (typ === "engine") { const s = el("select"); for (const o of ["rule", "big", "small"]) s.add(new Option(o, o)); s.value = v; s.onchange = () => set(s.value); return s; }
+  if (typ === "canaux") {
+    const w = el("span");
+    for (const c of CANAUX) { const l = el("label", { className: "chk" }), i = el("input", { type: "checkbox", checked: (v || []).includes(c) });
+      i.onchange = () => set(CANAUX.filter(x => x === c ? i.checked : (cur[id][k] || []).includes(x))); l.append(i, CANAL_FR[c]); w.append(l); }
+    return w;
+  }
+  if (typ === "list") { const i = el("input", { value: (v || []).join(", "), style: "width:140px" }); i.onchange = () => set(i.value.split(",").map(s => s.trim()).filter(Boolean)); return i; }
+  if (typ === "int" || typ === "float") { const i = el("input", { type: "number", value: v, step: typ === "int" ? 1 : .05 }); i.onchange = () => set(typ === "int" ? parseInt(i.value || 0) : parseFloat(i.value || 0)); return i; }
+  const i = el("input", { value: v ?? "", className: k === "situation" ? "wide" : "" }); if (k === "famille") i.classList.add("fam"); i.style.width = k === "famille" ? "64px" : ""; i.onchange = () => set(i.value); return i;
+}
+function el(t, props = {}) { return Object.assign(document.createElement(t), props); }
+const diff = id => id === "_bulk" ? {} : Object.fromEntries(COLS.map(([k]) => k).filter(k => JSON.stringify(cur[id][k]) !== JSON.stringify(base[id][k])).map(k => [k, cur[id][k]]));
+function mark(tr) { if (tr && base[tr.dataset.id]) tr.classList.toggle("changed", Object.keys(diff(tr.dataset.id)).length > 0); }
+
+function payload() {
+  // réglages déjà enregistrés + ce qui a changé depuis : un habitant non modifié garde les paramètres de son lot
+  const profiles = structuredClone(runInfo?.overrides || {});
+  for (const id in cur) { const d = diff(id); if (Object.keys(d).length) profiles[id] = Object.assign(profiles[id] || {}, d); }
+  return { type: "set_profiles", profiles, settings: { crue: $("crue").value, scenario: $("scenario").value, mode: $("mode").value, panne_reseau: $("panne").value.trim() || "none", vitesse: +$("vitesse").value, lots } };
+}
+let shown = [];
+// ajout en lot
+for (const c of CANAUX) { const l = el("label", { className: "chk" }), i = el("input", { type: "checkbox", checked: c === "telephone", value: c }); l.append(i, CANAL_FR[c]); $("lCanaux").append(l); }
+for (const id of ["A01","A02","A03","A04","A05","A06","A07","A08","A09","A10","A11","A12"]) $("lModele").add(new Option(id, id));
+$("lAdd").onclick = () => {
+  const n = parseInt($("lNombre").value || 0); if (!(n > 0)) { alert("Nombre d'habitants : au moins 1."); return; }
+  lots.push({ nombre: n, nom: $("lNom").value.trim() || `Lot ${lots.length + 1}`, modele: $("lModele").value, moteur: $("lMoteur").value,
+    part_llm: +$("lPart").value || 0, taille_foyer: Math.max(1, Math.min(6, +$("lFoyer").value || 1)), quartier: $("lQuartier").value,
+    canaux: [...$("lCanaux").querySelectorAll("input:checked")].map(i => i.value), dependants: $("lDeps").value.split(",").map(s => s.trim()).filter(Boolean) });
+  renderLots();
+};
+// modification en lot : une colonne, une valeur, tous les habitants affichés (après filtre)
+for (const [k, t, typ] of COLS) if (!["name", "situation", "contacts", "famille"].includes(k)) $("bCol").add(new Option(t, k));
+function bulkEditor() { const [k, , typ] = COLS.find(c => c[0] === $("bCol").value); cur._bulk = { [k]: typ === "bool" ? false : typ === "canaux" || typ === "list" ? [] : typ === "engine" ? "rule" : 0 }; $("bVal").replaceChildren(editor("_bulk", k, typ)); }
+$("bCol").onchange = bulkEditor;
+$("bApply").onclick = () => {
+  const k = $("bCol").value, v = cur._bulk[k];
+  if (!confirm(`Mettre « ${k} » = ${JSON.stringify(v)} pour ${shown.length} habitant(s) ?`)) return;
+  for (const id of shown) cur[id][k] = structuredClone(v);
+  render();
+};
+$("apply").onclick = () => {
+  const p = $("panne").value.trim();
+  if (p && p !== "none" && !/^\d\d:\d\d$/.test(p)) { alert("Panne du réseau : « none » ou une heure au format 09:40."); return; }
+  ws.send(JSON.stringify(payload())); setStatus(true, "réglages envoyés — la simulation relance un run…"); $("apply").disabled = true;
+};
+$("reset").onclick = () => { if (confirm("Effacer les réglages enregistrés et revenir aux habitants de la fiche ?")) { ws.send(JSON.stringify({ type: "set_profiles", reset: true })); $("apply").disabled = true; } };
+$("export").onclick = () => { const a = el("a", { href: URL_.createObjectURL(new Blob([JSON.stringify(payload(), null, 1)], { type: "application/json" })), download: "villageois.json" }); a.click(); };
+const URL_ = window.URL;
+$("importBtn").onclick = () => $("import").click();
+$("import").onchange = async e => {
+  const f = e.target.files[0]; if (!f) return;
+  try {
+    const d = JSON.parse(await f.text());
+    for (const [id, p] of Object.entries(d.profiles || {})) if (cur[id]) Object.assign(cur[id], p);
+    const s = d.settings || {}; if (s.crue) $("crue").value = s.crue; if (s.scenario) $("scenario").value = s.scenario; if (s.mode) $("mode").value = s.mode; if (s.panne_reseau) $("panne").value = s.panne_reseau;
+    render();
+  } catch { alert("Fichier JSON illisible."); }
+  e.target.value = "";
+};
+$("filter").oninput = render;
+$("vitesse").onchange = () => { if (ws?.readyState === 1) ws.send(JSON.stringify({ type: "set_speed", scale: +$("vitesse").value })); };
+bulkEditor(); renderLots();
+connect();
+</script>
+</body>
+</html>

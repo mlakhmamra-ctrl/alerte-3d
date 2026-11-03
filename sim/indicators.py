@@ -11,7 +11,8 @@ class Indicators:
         s.belief = {}; s.truth = {"bridge": "ouvert", "danger": False, "refuges": list(s.caps)}
         s.depart, s.arrive, s.wet, s.blocked, s.sheltered = {}, {}, {}, set(), set()
         s.msg = {"message": 0, "relais": 0, "correction": 0, "observation": 0, "rumeur": 0, "officiel": 0}
-        s.verified = 0; s.rumor_relays = 0; s.rumor_corrected = False; s.rumor_ids = set(); s.cc_last = None; s.cc_area = 0.0; s.cc_span = 0.0
+        s.distress, s.victims, s.damage = set(), set(), {}; s.n_houses = len({x.get("famille") for x in start.get("agents", [])})
+        s.verified = 0; s.lost = 0; s.network_up = True; s.by_canal = {}; s.rumor_relays = 0; s.rumor_corrected = False; s.rumor_ids = set(); s.cc_last = None; s.cc_area = 0.0; s.cc_span = 0.0
     def feed(s, ev):
         """Renvoie un dict d'indicateurs si l'événement les change, sinon None."""
         t, d, a = ev["type"], ev.get("data", {}), ev.get("agent")
@@ -23,8 +24,13 @@ class Indicators:
         elif t == "agent.blocked": s.blocked.add(a)
         elif t == "agent.shelter": s.sheltered.add(a); s.blocked.discard(a)
         elif t in ("agent.reroute",): s.blocked.discard(a)
+        elif t == "agent.distress": s.distress.add(a)
+        elif t == "agent.distress_end": s.distress.discard(a)
+        elif t == "agent.victim": s.victims.add(a); s.distress.discard(a); s.blocked.discard(a)
+        elif t == "house.damage": s.damage[d["house"]] = d["level"]
         elif t == "agent.say":
             k = d.get("kind", "message"); s.msg[k] = s.msg.get(k, 0) + 1
+            for c in d.get("canaux", {}).values(): s.by_canal[c] = s.by_canal.get(c, 0) + 1
             if d.get("parent") in s.rumor_ids or d.get("origin") == "anonyme":
                 s.rumor_ids.add(d["msg_id"])
                 if not s.rumor_corrected: s.rumor_relays += 1
@@ -32,6 +38,8 @@ class Indicators:
         elif t == "rumor": s.msg["rumeur"] += 1; s.rumor_ids.update(d.get("msg_ids", []))
         elif t == "official.bulletin": s.msg["officiel"] += 1
         elif t == "agent.verify_result": s.verified += 1
+        elif t == "message.lost": s.lost += len(d.get("to", []))
+        elif t == "network.down": s.network_up = False
         elif t == "world.tick":
             for p in d.get("agents", []): s.wet[p["id"]] = p.get("wet", 0)
             return None
@@ -62,7 +70,9 @@ class Indicators:
                "convergence_refuge": round(rn / n, 3), "refuge_mode": rb, "convergence_bridge": round(bn / n, 3), "bridge_mode": bb,
                "exact_bridge": round(sum(o[0] for o in ok) / n, 3), "exact_refuge": round(sum(o[1] for o in ok) / n, 3), "exact_danger": round(sum(o[2] for o in ok) / n, 3),
                "common_context": round(cc, 3), "common_context_avg": round(s.cc_area / s.cc_span, 3) if s.cc_span else round(cc, 3),
-               "messages": dict(s.msg), "verified": s.verified, "rumor_relays_before_correction": s.rumor_relays, "rumor_corrected": s.rumor_corrected,
+               "messages": dict(s.msg), "messages_by_canal": dict(s.by_canal), "messages_lost": s.lost, "network_up": s.network_up, "verified": s.verified, "rumor_relays_before_correction": s.rumor_relays, "rumor_corrected": s.rumor_corrected,
                "refuge_load": {r: [load[r], s.caps[r]] for r in s.caps}, "blocked": len(s.blocked), "sheltered": len(s.sheltered),
-               "wet_avg_min": round(sum(s.wet.values()) / n, 2), "truth": dict(s.truth)}
+               "wet_avg_min": round(sum(s.wet.values()) / n, 2), "truth": dict(s.truth),
+               "distress": len(s.distress), "victims": len(s.victims), "houses": s.n_houses,
+               "damage": {k: sum(1 for v in s.damage.values() if v == k) for k in ("legers", "graves", "sinistree")}}
         return out

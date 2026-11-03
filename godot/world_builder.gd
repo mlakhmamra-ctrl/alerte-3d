@@ -23,6 +23,8 @@ var siren: OmniLight3D
 var siren_mesh: MeshInstance3D
 var refuge_labels := {}
 var refuge_rims := {}
+var house_walls := {}       # identifiant d'habitant -> [matériau des murs de sa maison, couleur d'origine] (teinte des dégâts)
+const DAMAGE_COL := {"legers": Color("e8c547"), "graves": Color("e8862a"), "sinistree": Color("c8323a")}
 var refuge_slots := {}      # une lanterne par place du refuge : allumée = place occupée (pas de texte)
 var labels := []            # tous les textes 3D, cachés par défaut (consigne : pas de texte dans la visualisation)
 var show_labels := false
@@ -193,6 +195,7 @@ func build(d: Dictionary) -> void:
 	blockers.clear()
 	lamps.clear()
 	foliage_mats.clear()
+	house_walls.clear()
 	refuge_labels.clear()
 	refuge_rims.clear()
 	refuge_slots.clear()
@@ -707,7 +710,11 @@ func _house(x: float, z: float, ang: float, tag := "", outside := false) -> void
 	var walls := [Color("e9dcc9"), Color("d8c3a5"), Color("c9d6df"), Color("e4cfb0"), Color("d6d0c4"), Color("f0e2d0"), Color("bfc9b5")]
 	var roofs := [Color("8b3a2b"), Color("6b4436"), Color("4f5b66"), Color("9a4b32")]
 	box(p, Vector3(8, 0.5, 7), mat(Color("8b8378")), Vector3(0, 0.25, 0))
-	box(p, Vector3(8, 4.2, 7), mat(walls[rng.randi() % walls.size()]), Vector3(0, 2.6, 0))
+	var wm := mat(walls[rng.randi() % walls.size()])
+	if tag != "":                                 # maison d'un habitant : matériau propre, pour la teinter selon les dégâts
+		wm = wm.duplicate()
+		house_walls[tag] = [wm, wm.albedo_color]
+	box(p, Vector3(8, 4.2, 7), wm, Vector3(0, 2.6, 0))
 	var roof := MeshInstance3D.new()
 	var pm := PrismMesh.new()
 	pm.size = Vector3(8.6, 1.8, 7.6)
@@ -723,6 +730,12 @@ func _house(x: float, z: float, ang: float, tag := "", outside := false) -> void
 			box(p, Vector3(1.1, 1.0, 0.08), mat(Color("ffd9a0"), 0.2, 0.0, 0.5) if lit else mat(Color("2a3340"), 0.15, 0.3), Vector3(s * 2.4, 1.8 + i * 2.0, -3.52))
 	if tag != "":
 		text3d(p, tag, Vector3(0, 7.2, 0), 26, Color(1, 1, 1, 0.55))
+
+func set_damage(ids: Array, lvl: String) -> void:
+	for id in ids:                                 # tout le foyer : une seule maison est construite par foyer
+		var h = house_walls.get(id)
+		if h != null:
+			h[0].albedo_color = h[1].lerp(DAMAGE_COL.get(lvl, h[1]), 0.65)
 
 func _houses(agents: Array) -> void:
 	for a in agents:                               # la maison de chaque habitant, derrière sa porte, face à sa rue

@@ -31,11 +31,12 @@ Les champs en **gras** sont obligatoires (vérifiés par la passerelle). Les aut
 
 | type | quand | data |
 |---|---|---|
-| `run.start` | début du run | **n_agents**, **agents** (profils, positions, contacts, moteur), **refuges**, **streets** (nœuds et arêtes), **heightmap**, **map** ; mode, scenario, seed, time_scale, t_start, t_end, update_at, rumor_at, bridge_close_at, models, llm_agents |
+| `run.start` | début du run | **n_agents**, **agents** (profils, positions, contacts, moteur), **refuges**, **streets** (nœuds et arêtes), **heightmap**, **map** ; mode, scenario, seed, time_scale, t_start, t_end, update_at, rumor_at, bridge_close_at, models, llm_agents, apis (API LLM), crue (type, débordement, pic, montée max), crues, panne_reseau, canaux, families (foyers), custom (réglages de l'interface de gestion actifs). Chaque agent porte aussi famille, family, dependants, canaux et ses paramètres de règle |
 | `world.truth` | au début et à chaque changement | **bridge** (`ouvert`/`ferme`), **danger** (vrai à partir de 09:10), **refuges** (encore accessibles et non pleins). C'est la vérité qui sert à calculer les indicateurs, jamais montrée aux agents |
 | `world.tick` | toutes les 5 s simulées | **level** (niveau d'eau), **agents** (position, état, refuge de chacun) ; bridge |
-| `flood.update` | quand l'eau change | **level**, **cells** (profondeur par cellule de 5 m) |
-| `official.bulletin` | 09:00 (vigilance) et `UPDATE_AT` (évacuation), ou commande | **level**, **text** ; claims, msg_id, to (qui l'a reçu) |
+| `flood.update` | quand l'eau change | **level**, **cells** (profondeur par cellule de 5 m) ; rate (montée en cm/min), crue (type) |
+| `network.down` | `PANNE_RESEAU`, ou commande | **at** ; canaux (coupés) |
+| `official.bulletin` | 09:00 (vigilance) et `UPDATE_AT` (évacuation), ou commande | **level**, **text** ; claims, msg_id, to (qui l'a reçu), canaux (par habitant : `officiel`, `radio`, `sirene`), missed (qui ne l'a pas reçu) |
 | `rumor` | `RUMOR_AT`, ou commande | **text**, **claim** (`ferme`/`ouvert`), **targets** ; msg_ids, true (la rumeur est-elle vraie à ce moment ?) |
 | `bridge.closed` | 09:20 en `pont_ferme`, ou commande | at |
 | `refuge.full` | un refuge atteint sa capacité | **refuge** |
@@ -48,15 +49,20 @@ Les champs en **gras** sont obligatoires (vérifiés par la passerelle). Les aut
 
 | type | quand | data |
 |---|---|---|
-| `agent.think` | chaque décision | **action**, **why** (justification), **decider** (`rule`, `big`, `small`, ou `rule` après un échec LLM) ; model, t_info (heure de la dernière information utilisée), risk, latency_ms, retrieved (textes retrouvés), retrieved_meta (id, fiabilité), query |
+| `agent.think` | chaque décision | **action**, **why** (justification), **decider** (`rule`, `big`, `small`, ou `rule` après un échec LLM) ; model (modèle réellement utilisé), api (API qui a répondu), t_info (heure de la dernière information utilisée), risk, latency_ms, retrieved (textes retrouvés), retrieved_meta (id, fiabilité), query |
 | `agent.belief` | la croyance change | **bridge**, **refuge**, **danger**, **risk** ; certainty |
-| `agent.say` | un message part vers des contacts | **to**, **text**, **kind** (`relais`, `observation`, `correction`…), **origin** (source d'origine), **msg_id** ; hops, parent (message relayé), claims, decider, model |
+| `agent.say` | un message part vers des contacts | **to**, **text**, **kind** (`relais`, `observation`, `correction`…), **origin** (source d'origine), **msg_id** ; hops, parent (message relayé), claims, decider, model, canaux (par destinataire : `face_a_face`, `telephone`, `groupe`). kind `famille` : appel au départ dans le foyer |
+| `message.lost` | destinataires injoignables | **to**, **reason** (réseau coupé, aucun canal commun) ; kind, msg_id |
 | `agent.observe` | l'habitant voit l'eau | **what** ; depth, where |
 | `agent.prepare` | il commence à préparer son départ | **ready_at** ; refuge |
 | `agent.depart` | il part (irréversible) | **refuge**, **via** (`pont_central`, `passage_hauteurs` ou `sans_franchissement`), **path** ; nodes, length, why |
 | `agent.reroute` | il change de chemin en route | **reason**, **path** ; refuge, old_refuge, via, nodes |
 | `agent.blocked` | plus de chemin praticable, même pour rentrer chez soi | **reason** ; at |
 | `agent.shelter` | aucun chemin sûr vers un refuge : l'habitant reste (ou rentre) chez lui, à l'étage | **reason** |
+| `agent.distress` | en danger : dehors dans 30 cm d'eau ou plus, ou 50 cm au rez-de-chaussée sans pouvoir monter à l'étage (paramètres de maquette) | **reason** ; depth |
+| `agent.distress_end` | il n'est plus en danger (il a bougé, ou l'eau a baissé) | — |
+| `agent.victim` | en danger depuis `VICTIM_MIN` minutes (15 par défaut) : victime, il ne bouge plus | **reason** ; minutes |
+| `house.damage` | l'eau devant une maison passe un seuil : `legers` (5 cm), `graves` (20 cm), `sinistree` (50 cm) | **house** (foyer), **agents**, **level** ; depth |
 | `agent.verify` | il appelle le poste municipal | **until** (fin de l'appel, 3 min) ; topic |
 | `agent.verify_result` | réponse du poste | **result** ; bridge |
 | `agent.arrive` | arrivée au refuge | **refuge** ; t_depart, load, cap |
@@ -76,6 +82,9 @@ Godot envoie du JSON sur le WebSocket ; la passerelle le pose dans `alerte.comma
 | `{"type": "set_mode", "mode": "sync"}` | relance un run dans l'autre mode |
 | `{"type": "set_scenario", "scenario": "pont_ouvert"}` | relance un run avec l'autre scénario |
 | `{"type": "restart"}` | relance un run avec les mêmes réglages |
+| `{"type": "network_down"}` | coupe le réseau mobile maintenant |
+| `{"type": "set_speed", "scale": 10}` | change la vitesse du temps simulé tout de suite (0,5 à 60) ; répond par `run.speed` (**scale**) |
+| `{"type": "set_profiles", "profiles": {...}, "settings": {...}}` | interface de gestion : enregistre les habitants et réglages (`data/villageois.json`) et relance ; `{"type": "set_profiles", "reset": true}` les efface |
 
 ### Indicateurs (passerelle → Godot et `alerte.indicators`)
 

@@ -5,11 +5,15 @@ observer -> interpréter -> agir -> communiquer -> mettre à jour la mémoire.
   (contacts, temps, déplacements). Si le LLM échoue, l'agent applique ses règles pour ce tour (A4)."""
 import math
 from world import REFUGES, REFUGE_R, BRIDGE, STAIRS, ekey, hm, via_of, speed_factor
+STATE_FR = {"home": "chez soi", "preparing": "se prépare", "walking": "en route", "blocked": "bloqué(e)", "arrived": "au refuge", "sheltered": "à l'abri à l'étage", "victim": "victime"}
 
 WALK = 1.2                                   # m/s, vitesse de référence de la fiche
 SAFE_DEPTH = 0.2                             # m : au-delà, un habitant au sec refuse d'entrer dans la rue (corpus crue-03)
 DANGER_DEPTH = 0.3                           # m : surpris par l'eau qui monte, il quitte la rue pour le bâtiment le plus proche
 SEV = {"vigilance": 30, "alerte": 65, "evacuation": 95}
+FAST_RISE = 1.5                              # cm/min : au-delà, un habitant qui voit l'eau la voit monter « à vue d'œil »
+CANAL_FR = {"face_a_face": "de vive voix", "telephone": "par téléphone", "groupe": "sur le groupe du quartier", "radio": "à la radio",
+            "sirene": "par la sirène", "officiel": "par l'alerte officielle sur mobile"}
 ACTIONS = ["rester", "preparer_depart", "partir", "changer_itineraire", "relayer", "verifier", "corriger"]
 
 def who(src, agents):
@@ -29,22 +33,27 @@ class Agent:
         s.state = "home"; s.t_ready = None; s.t_depart = None; s.t_arrive = None; s.path = []; s.seg = 0; s.via = "aucun"
         s.wet = 0.0; s.why = "chez soi, ne sait pas encore qu'une crue arrive"; s.last_action = "rester"; s.last_retrieved = []
         s.dirty = True; s.next_think = 540.0; s.last_think = -1e9; s.thinking = False; s.verify_until = None; s.verify_topic = None
-        s.departed_contacts = set(); s.blocked_since = None; s.going_home = False
+        s.departed_contacts = set(); s.blocked_since = None; s.going_home = False; s.distress_since = None
         s.inbox_read = []; s.checked = set(); s.known_full = set(); s.bridge_seen = False; s.via_pref = None
+        s.family = set(); s.family_called = False; s.pace = None      # family : autres membres du foyer (World) ; pace : allure du groupe familial
 
     # ---------- perception ----------
     def remember(s, t, text, *tags): s.mem.append((t, text, set(tags))); del s.mem[:-60]
 
-    def trust_of(s, src):
+    def trust_of(s, src, canal=None):
         if src == "mairie": return s.p["trust_off"]
         if src == "anonyme": return 1
-        return s.p["trust_nb"]
+        if src in s.family: return 5                                  # on croit sa famille
+        return max(1, s.p["trust_nb"] - (1 if canal == "groupe" else 0))   # le groupe du quartier : on y lit de tout, on s'y fie moins
+
+    def trust_msg(s, m): return s.trust_of(m["src"], m.get("canal"))
 
     # ---------- interprétation à règles (aussi le repli des agents LLM) ----------
     def rule_risk(s, now, w):
         off = max([SEV.get(m["level"], 0) * s.p["trust_off"] / 5 for m in s.inbox_read if m["src"] == "mairie"] or [0])
-        msg = max([SEV.get(m["level"], 0) * s.trust_of(m["src"]) / 5 for m in s.inbox_read if m["src"] != "mairie"] or [0])
+        msg = max([SEV.get(m["level"], 0) * s.trust_msg(m) / 5 for m in s.inbox_read if m["src"] != "mairie"] or [0])
         obs = 90 if s.water_seen >= .3 else 60 if s.water_seen >= .1 else 35 if s.water_seen >= .03 else 0
+        if obs and w.flood.rate(now) >= FAST_RISE: obs = min(100, obs + 20)          # l'eau monte à vue d'œil : c'est plus inquiétant
         soc = min(40, 15 * len(s.departed_contacts)) * s.p["trust_nb"] / 5
         parts = sorted([off, msg, obs, soc], reverse=True)
         return int(min(100, parts[0] + .3 * sum(parts[1:])))
@@ -55,7 +64,7 @@ class Agent:
         for m in s.inbox_read:
             b = m["claims"].get("bridge")
             if b not in ("ouvert", "ferme"): continue
-            tr = s.trust_of(m["src"])
+            tr = s.trust_msg(m)
             if m["src"] == "mairie" or m.get("verified") or tr >= 3:
                 if best is None or m["t_deliver"] >= best[1]: best = (b, m["t_deliver"], tr)
         return (best[0], min(1.0, best[2] / 5)) if best else (s.bridge, s.bridge_cert)
@@ -89,7 +98,7 @@ class Agent:
         s.risk = s.rule_risk(now, w)
         b, c = s.rule_bridge_belief()
         if b != s.bridge: s.bridge, s.bridge_cert = b, c
-        if s.risk >= 60 or any(m["claims"].get("danger") for m in s.inbox_read if s.trust_of(m["src"]) >= 3): s.danger = True
+        if s.risk >= 60 or any(m["claims"].get("danger") for m in s.inbox_read if s.trust_msg(m) >= 3): s.danger = True
         # vérifier une information non officielle sur le pont (agents vérificateurs)
         unver = [m for m in s.inbox_read if m["claims"].get("bridge") and m["src"] != "mairie" and not m.get("verified") and m["id"] not in s.checked]
         if s.p["verifier"] and unver and s.state in ("home", "preparing") and s.verify_until is None:
@@ -113,6 +122,8 @@ class Agent:
                 f"Ta confiance dans les alertes officielles est de {p['trust_off']}/5, dans tes voisins de {p['trust_nb']}/5. "
                 f"Tu te déplaces à {round(p['mob'] * WALK, 2)} m/s. {'Tu ne peux pas prendre d’escaliers. ' if p['no_stairs'] else ''}"
                 f"{'Tu connais bien le détour par le Passage des Hauteurs. ' if p['knows_detour'] else ''}"
+                f"{'Tu as à charge : ' + ', '.join(p['dependants']) + ' ; tu ne pars pas sans eux. ' if p.get('dependants') else ''}"
+                f"Pour communiquer tu as : {', '.join(['la voix (à portée de voix)'] + [CANAL_FR[c] for c in p.get('canaux', [])])}. "
                 f"Tu parles comme une vraie personne du quartier, en français, jamais comme un assistant. Tu ne sais que ce que tu as vu, lu ou entendu. "
                 f"Réponds uniquement en JSON.")
 
@@ -130,28 +141,33 @@ class Agent:
     async def llm_decide(s, w, now, retrieve):
         focus = "pont central fermé ouvert rumeur vérifier" if any(m["claims"].get("bridge") for m in s.inbox_read[-3:]) else "crue évacuation refuge itinéraire"
         r = await retrieve(s, focus)
-        msgs = "\n".join(f"- {hm(m['t_deliver'])}, de {who(m['src'], w.agents)}" + (f" (relayé, source d'origine : {who(m['origin'], w.agents)})" if m["origin"] != m["src"] else "")
+        msgs = "\n".join(f"- {hm(m['t_deliver'])}, de {who(m['src'], w.agents)} {CANAL_FR.get(m.get('canal'), '')}" + (f" (relayé, source d'origine : {who(m['origin'], w.agents)})" if m["origin"] != m["src"] else "")
                          + f" : « {m['text']} »" + (" [vérifié]" if m.get("verified") else "") for m in s.inbox_read[-6:]) or "- (aucun)"
         here = f"{int(s.water_seen * 100)} cm d'eau devant chez toi" if s.water_seen >= .05 else "de l'eau visible dans la rue" if s.water_seen > 0 else "pas d'eau visible près de toi"
+        if s.water_seen > 0:
+            rate = w.flood.rate(now); here += f", l'eau monte {'à vue d’œil' if rate >= FAST_RISE else 'lentement'} (environ {rate:g} cm par minute)"
+        if not w.network_up: here += ". Ton téléphone n'a plus de réseau"
         state = {"home": "chez toi", "preparing": f"tu prépares ton départ (prêt à {hm(s.t_ready or now)})", "walking": f"en route vers {REFUGES.get(s.refuge, {}).get('name', '?')} par {s.via}",
                  "blocked": "bloqué(e) : le chemin prévu est coupé"}.get(s.state, s.state)
         contacts = ", ".join(f"{w.agents[c].name} ({c}, {'parti(e)' if c in s.departed_contacts else 'pas encore parti(e)'})" for c in s.p["contacts"] if c in w.agents)
+        fam = ", ".join(f"{w.agents[c].name} ({c}, {STATE_FR.get(w.agents[c].state, w.agents[c].state)})" for c in sorted(s.family)) or "personne d'autre (tu vis seul(e))"
         user = (f"Il est {hm(now)}. Tu es {state}. Observation : {here}.\n"
                 f"Ce que tu crois : pont central {s.bridge}, refuge visé {s.refuge}, danger imminent {'oui' if s.danger else 'non'}.\n"
                 f"Messages reçus (les plus récents) :\n{msgs}\n"
-                f"Tes contacts directs : {contacts}.\nCe que tu retrouves (documents du quartier et souvenirs) :\n" + "\n".join("- " + x for x in r["strings"]) + "\n"
+                f"Ta famille sous ton toit : {fam}.\nTes contacts directs : {contacts}.\nCe que tu retrouves (documents du quartier et souvenirs) :\n" + "\n".join("- " + x for x in r["strings"]) + "\n"
                 f"Refuges : " + ", ".join(f"{R['name']} ({k}, rive {R['bank']}, {R['cap']} places{', ' + R['note'] if R['note'] else ''})" for k, R in REFUGES.items()) + ".\n"
                 f"Actions : rester, preparer_depart, partir, changer_itineraire, relayer (transmettre à tes contacts), verifier (appeler le poste municipal, 3 min), corriger (signaler une erreur à tes contacts).\n"
                 f"Réponds : croyance (pont_central, refuge, danger_imminent), risque (0-100), action, itineraire, justification (15 mots au plus, en citant ce qui t'a convaincu), "
                 f"message (ce que tu écris à tes contacts, une phrase courte avec la source et l'heure, ou \"\" si tu n'écris pas).")
-        o = await w.llm.ask(s, s.model, s.system_prompt(w), user, s.schema(s.p["contacts"]))
+        o = await w.llm.ask(s, s.kind, s.system_prompt(w), user, s.schema(s.p["contacts"]))
         if o is None: return None, r
         try:
             c = o["croyance"]; act = o["action"]
             assert act in ACTIONS and c["pont_central"] in ("ouvert", "ferme", "inconnu") and (c["refuge"] in REFUGES or c["refuge"] == "aucun")
             out = dict(action=act, justification=str(o.get("justification", ""))[:240], message=str(o.get("message", ""))[:300],
                        risk=int(o["risque"]), bridge=c["pont_central"], refuge=c["refuge"], danger=bool(c["danger_imminent"]),
-                       via=o.get("itineraire") if o.get("itineraire") in ("pont_central", "passage_hauteurs") else None, latency_ms=o.get("_latency_ms"))
+                       via=o.get("itineraire") if o.get("itineraire") in ("pont_central", "passage_hauteurs") else None, latency_ms=o.get("_latency_ms"),
+                       model=o.get("_model"), api=o.get("_api"))
         except Exception as ex:
             await w.incident(s, "invalid_output", f"{ex!r} {str(o)[:100]}"); return None, r
         if out["bridge"] != "inconnu" and not any(m["claims"].get("bridge") for m in s.inbox_read) and not s.bridge_seen:
@@ -165,7 +181,7 @@ class Agent:
         for m in s.inbox_read:
             if m["t_deliver"] > t_info: w.stats.viol += 1           # C6 : jamais un message utilisé avant d'être remis
         s.dirty = False; s.next_think = now + w.think_every; s.last_think = now
-        if s.state in ("arrived", "sheltered") or (s.state == "walking" and s.kind != "rule"): return     # en marche, un agent LLM ne délibère pas (sobriété)
+        if s.state in ("arrived", "sheltered", "victim") or (s.state == "walking" and s.kind != "rule"): return     # en marche, un agent LLM ne délibère pas (sobriété)
         if s.state == "blocked":                                     # réessaie un autre chemin avec ce qu'il sait maintenant
             await s.reroute(w, now, None, "cherche un autre chemin")
             if s.state == "blocked": return
@@ -184,7 +200,7 @@ class Agent:
             if d["refuge"] != "aucun": s.refuge = d["refuge"]
         now2 = w.clock.now()
         s.why = d["justification"] or s.why; s.last_action = d["action"]; s.last_retrieved = r["strings"] if r else []
-        await w.emit("agent.think", s.id, action=d["action"], why=s.why, decider=decided_by, model=s.model if decided_by != "rule" else None,
+        await w.emit("agent.think", s.id, action=d["action"], why=s.why, decider=decided_by, model=d.get("model") if decided_by != "rule" else None, api=d.get("api"),
                      t_info=round(t_info, 2), risk=s.risk, latency_ms=d.get("latency_ms"), retrieved=s.last_retrieved, retrieved_meta=r["meta"] if r else [], query=r["query"] if r else "")
         await s.publish_belief(w)
         await s.apply(w, d, now2)
@@ -200,10 +216,7 @@ class Agent:
         if a == "verifier" and s.verify_until is None and s.state in ("home", "preparing"):
             s.verify_until = now + 3; await w.emit("agent.verify", s.id, topic="pont", until=round(s.verify_until, 2))
         elif a in ("preparer_depart", "partir") and s.state == "home":
-            prep = s.p["prep"] if a == "preparer_depart" or s.p["prep"] >= 6 else 1      # Lina et Maya ne peuvent pas partir sans préparer
-            s.state, s.t_ready = "preparing", now + prep
-            s.remember(now, f"{hm(now)} — je prépare mon départ (prêt vers {hm(s.t_ready)})", "depart")
-            await w.emit("agent.prepare", s.id, ready_at=round(s.t_ready, 2), refuge=s.refuge)
+            await s.start_prep(w, now, full=a == "preparer_depart")
         elif a == "partir" and s.state == "preparing" and now >= s.t_ready:
             await s.depart(w, now, d.get("via"))
         elif a == "changer_itineraire" and s.state in ("walking", "blocked"):
@@ -215,7 +228,7 @@ class Agent:
             s.seen_msgs.update(m["id"] for m in fwd)
             if s.kind == "rule":
                 for m in fwd:                                        # relais à règles : selon la confiance et le profil
-                    if (m["src"] == "mairie" or s.trust_of(m["src"]) >= 3) and s.rng.random() < s.p["relay"]:
+                    if (m["src"] == "mairie" or s.trust_msg(m) >= 3) and s.rng.random() < s.p["relay"]:
                         keep = s.rng.random() > (.3 if s.p["relay"] > .7 else .1)        # la source se perd parfois en route
                         await w.send(s, m["text"], m["claims"], "relais", origin=m["origin"] if keep else s.id, hops=m["hops"] + 1, parent=m["id"])
             if a == "corriger" and s.kind == "rule": pass
@@ -227,6 +240,12 @@ class Agent:
             origin = s.id if (s.bridge_seen or kind == "correction" or not src_m) else src_m["origin"]
             await w.send(s, msg, claims, kind, origin=origin, hops=(src_m["hops"] + 1 if src_m and origin != s.id else 0), parent=src_m["id"] if src_m else None)
             s.seen_msgs.update(m["id"] for m in s.inbox_read)
+
+    async def start_prep(s, w, now, full=True, why=None):
+        prep = s.p["prep"] if full or s.p["prep"] >= 6 else 1                # Lina et Maya ne peuvent pas partir sans préparer
+        s.state, s.t_ready = "preparing", now + prep
+        s.remember(now, f"{hm(now)} — je prépare mon départ (prêt vers {hm(s.t_ready)}){' : ' + why if why else ''}", "depart")
+        await w.emit("agent.prepare", s.id, ready_at=round(s.t_ready, 2), refuge=s.refuge, why=why)
 
     # ---------- mouvements ----------
     async def shelter_or_block(s, w, now, reason):
@@ -301,7 +320,7 @@ class Agent:
                 s.remember(now, f"{hm(now)} — trop d'eau ({int(depth_next * 100)} cm) vers {w.streets.meta[k][1]}, je fais demi-tour", "eau")
                 await w.emit("agent.observe", s.id, what="rue_inondee", where=[bx, bz], depth=round(depth_next, 2), street=w.streets.meta[k][1])
                 await s.reroute(w, now, None, "rue inondée"); continue
-            v = WALK * s.p["mob"] * speed_factor(w.flood.depth(s.x, s.z, now))
+            v = WALK * (s.pace or s.p["mob"]) * speed_factor(w.flood.depth(s.x, s.z, now))   # en famille : à l'allure du plus lent
             if v <= 0:
                 if s.state != "blocked": s.blocked_since = now
                 s.state = "blocked"; await w.emit("agent.blocked", s.id, reason="eau trop haute ici", at=s.node); return

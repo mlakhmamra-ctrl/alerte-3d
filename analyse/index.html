@@ -1,0 +1,793 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Analyse des runs</title>
+<!-- ALERTE 3D — analyse des simulations enregistrées. Ouvrir ce fichier dans un navigateur (lancer_analyse.bat), puis charger
+     un ou plusieurs fichiers data/runs/<run_id>.jsonl (ou tout le dossier). Tout se passe dans le navigateur : rien n'est envoyé.
+     Onglets : vue d'ensemble d'un run, rejeu sur la carte, suivi complet de chaque habitant, comparaison des paramètres et des profils. -->
+<style>
+:root { --bg: #0f141b; --panel: #171e27; --line: #263140; --text: #e6edf3; --muted: #8899aa; --accent: #3ddc84; --warn: #ff9f1c; --bad: #ff4d5e; --grid: #222b37;
+  --s-home: #d55181; --s-preparing: #c98500; --s-walking: #3987e5; --s-blocked: #d95926; --s-arrived: #199e70; --s-sheltered: #9085e9; --s-victim: #e66767;
+  --water: #3987e5; --risk: #eda100; color-scheme: dark; }
+@media (prefers-color-scheme: light) { :root:not([data-theme="dark"]) { --bg: #f4f6f8; --panel: #fff; --line: #d8dee6; --text: #1b2430; --muted: #5d6b7a; --accent: #1f9d5a; --warn: #c26a00; --bad: #c62b3a; --grid: #e8ecf0;
+  --s-home: #e87ba4; --s-preparing: #eda100; --s-walking: #2a78d6; --s-blocked: #eb6834; --s-arrived: #1baf7a; --s-sheltered: #6250d6; --s-victim: #e34948;
+  --water: #2a78d6; --risk: #c98500; color-scheme: light; } }
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+header { position: sticky; top: 0; z-index: 5; background: var(--panel); border-bottom: 1px solid var(--line); padding: 10px 16px; display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+h1 { font-size: 17px; margin: 0 12px 0 0; }
+nav { display: flex; gap: 4px; flex-wrap: wrap; }
+nav button.on { border-color: var(--accent); color: var(--accent); }
+main { padding: 12px 16px 40px; max-width: 1500px; }
+section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px; margin-bottom: 12px; min-width: 0; }
+h2 { font-size: 14px; margin: 0 0 8px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+h3 { font-size: 13px; margin: 10px 0 6px; color: var(--muted); font-weight: 500; }
+.row { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+.grid2 { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; }
+.grid-map { display: grid; grid-template-columns: minmax(0, 2fr) minmax(280px, 1fr); gap: 12px; }
+@media (max-width: 900px) { .grid2, .grid-map { grid-template-columns: minmax(0, 1fr); } }
+input, select { background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 4px 6px; font: inherit; }
+button { background: transparent; color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 6px 12px; font: inherit; cursor: pointer; }
+button:hover { border-color: var(--muted); }
+button.primary { background: var(--accent); color: #062312; border-color: var(--accent); font-weight: 600; }
+label.f { display: inline-flex; gap: 6px; align-items: center; font-size: 13px; color: var(--muted); }
+.muted { color: var(--muted); }
+.note { font-size: 12px; color: var(--muted); margin: 6px 0 0; }
+.table-wrap { overflow: auto; max-height: 520px; }
+table { border-collapse: collapse; width: 100%; font-size: 13px; }
+th, td { border-bottom: 1px solid var(--line); padding: 4px 6px; text-align: left; vertical-align: top; white-space: nowrap; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+th { position: sticky; top: 0; background: var(--panel); color: var(--muted); font-weight: 500; cursor: pointer; z-index: 1; }
+tbody tr { cursor: default; }
+tbody tr.click { cursor: pointer; }
+tbody tr.click:hover, tbody tr.sel { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
+.tile { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+.tile b { display: block; font-size: 22px; font-variant-numeric: tabular-nums; }
+.tile span { font-size: 12px; color: var(--muted); }
+.kv { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; font-size: 13px; }
+.kv dt { color: var(--muted); }
+.kv dd { margin: 0; }
+.chart { position: relative; width: 100%; }
+.chart svg { display: block; width: 100%; height: auto; overflow: visible; }
+.chart text { fill: var(--muted); font-size: 11px; }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; color: var(--muted); margin: 4px 0; }
+.legend i { display: inline-block; width: 12px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+.legend i.ln { height: 2px; vertical-align: 3px; }
+.tip { position: absolute; pointer-events: none; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; font-size: 12px; box-shadow: 0 4px 14px rgba(0,0,0,.25); white-space: nowrap; z-index: 3; display: none; }
+.tip .r { display: flex; gap: 8px; align-items: center; }
+.tip .r i { width: 10px; height: 2px; display: inline-block; }
+.tip .r b { min-width: 34px; text-align: right; font-variant-numeric: tabular-nums; }
+.dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 5px; }
+.chip { display: inline-block; border: 1px solid var(--line); border-radius: 10px; padding: 0 7px; font-size: 12px; margin: 0 4px 4px 0; color: var(--muted); }
+.journal { max-height: 620px; overflow: auto; font-size: 13px; }
+.journal .e { display: grid; grid-template-columns: 46px 108px minmax(0, 1fr); gap: 8px; padding: 4px 0; border-bottom: 1px solid var(--line); }
+.journal .e .t { color: var(--muted); font-variant-numeric: tabular-nums; }
+.journal .e .k { font-size: 12px; }
+.journal .e .x { white-space: normal; overflow-wrap: anywhere; }
+.journal .e .x q { color: var(--muted); }
+canvas { display: block; width: 100%; border-radius: 8px; background: var(--bg); touch-action: none; }
+#drop { border: 2px dashed var(--line); border-radius: 10px; padding: 28px; text-align: center; color: var(--muted); }
+#drop.over { border-color: var(--accent); color: var(--text); }
+.hidden { display: none !important; }
+.bar-pos { color: var(--accent); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Analyse des runs</h1>
+  <button id="pickFiles" class="primary">Charger des runs…</button>
+  <button id="pickDir">Charger un dossier…</button>
+  <input id="files" type="file" accept=".jsonl" multiple hidden>
+  <input id="dir" type="file" webkitdirectory hidden>
+  <label class="f">Run <select id="runSel"></select></label>
+  <span id="status" class="muted"></span>
+  <span style="flex:1"></span>
+  <nav id="tabs">
+    <button data-tab="overview" class="on">Vue d'ensemble</button>
+    <button data-tab="replay">Rejeu</button>
+    <button data-tab="agents">Agents</button>
+    <button data-tab="params">Paramètres et comportements</button>
+  </nav>
+</header>
+<main>
+  <section id="drop">
+    Chargez un ou plusieurs fichiers <b>data/runs/&lt;run_id&gt;.jsonl</b> (chaque simulation y est enregistrée en entier),
+    ou un dossier entier (ex. <b>data/etude/</b>) pour comparer les paramètres. Vous pouvez aussi glisser les fichiers ici.
+  </section>
+
+  <div id="tab-overview" class="tab hidden">
+    <section><h2>Paramètres du run</h2><dl class="kv" id="params"></dl></section>
+    <section><h2>Bilan</h2><div class="tiles" id="tiles"></div></section>
+    <section><h2>États des habitants au fil du temps</h2><div class="legend" id="stateLegend"></div><div class="chart" id="chartStates"></div>
+      <p class="note">Survolez le graphique pour lire le nombre d'habitants dans chaque état à une heure donnée.</p></section>
+    <div class="grid2">
+      <section><h2>Niveau de l'eau (m)</h2><div class="chart" id="chartLevel"></div></section>
+      <section><h2>Départs cumulés</h2><div class="chart" id="chartDeparts"></div></section>
+    </div>
+    <section><h2>Événements clés</h2><div class="journal" id="keyEvents"></div></section>
+  </div>
+
+  <div id="tab-replay" class="tab hidden">
+    <div class="grid-map">
+      <section>
+        <div class="row" style="margin-bottom:8px">
+          <button id="play">Lecture</button>
+          <label class="f">Vitesse <select id="speed"><option value="10">×10</option><option value="30" selected>×30 (1 h en 2 min)</option><option value="60">×60</option><option value="180">×180</option></select></label>
+          <input id="scrub" type="range" min="0" max="0" value="0" style="flex:1;min-width:160px">
+          <b id="clock">--:--</b>
+        </div>
+        <canvas id="map" height="520"></canvas>
+        <div class="legend" id="mapLegend"></div>
+        <p class="note">Cliquez sur un habitant pour le sélectionner. Le bleu des cases montre la hauteur d'eau.</p>
+      </section>
+      <section>
+        <h2>Habitant sélectionné</h2><div id="mapSel" class="muted">Aucun.</div>
+        <h2 style="margin-top:14px">Ce qui vient de se passer</h2><div class="journal" id="mapFeed" style="max-height:380px"></div>
+      </section>
+    </div>
+  </div>
+
+  <div id="tab-agents" class="tab hidden">
+    <section>
+      <div class="row" style="margin-bottom:8px"><h2 style="margin:0">Habitants</h2>
+        <input id="agFilter" placeholder="Filtrer (nom, id, état, moteur…)" style="min-width:240px"><span class="muted" id="agCount"></span></div>
+      <div class="table-wrap" style="max-height:340px"><table id="agTable"></table></div>
+    </section>
+    <section id="agDetail" class="hidden">
+      <div class="row"><h2 style="margin:0" id="agTitle"></h2><span style="flex:1"></span><button id="agCsv">Exporter le suivi (CSV)</button></div>
+      <div class="grid2" style="margin-top:8px">
+        <div><h3>Profil</h3><div id="agProfile"></div><h3>Bilan</h3><dl class="kv" id="agOutcome"></dl></div>
+        <div><h3>Trajet</h3><canvas id="agMap" height="260"></canvas></div>
+      </div>
+      <h3>États au fil du temps</h3><div class="chart" id="agStates"></div>
+      <div class="grid2">
+        <div><h3>Risque perçu (0-100)</h3><div class="chart" id="agRisk"></div></div>
+        <div><h3>Eau à ses pieds (cm)</h3><div class="chart" id="agDepth"></div></div>
+      </div>
+      <h3>Suivi complet, du début à la fin</h3>
+      <div class="row" id="agKinds" style="margin-bottom:6px"></div>
+      <div class="journal" id="agJournal"></div>
+    </section>
+  </div>
+
+  <div id="tab-params" class="tab hidden">
+    <section>
+      <h2>Runs chargés</h2>
+      <div class="table-wrap" style="max-height:300px"><table id="runTable"></table></div>
+      <p class="note">Un clic sur une ligne ouvre ce run dans les autres onglets.</p>
+    </section>
+    <section>
+      <h2>Effet d'un paramètre</h2>
+      <div class="row" style="margin-bottom:8px">
+        <label class="f">Regrouper par <select id="groupBy"></select></label>
+        <label class="f">Indicateur <select id="metric"></select></label>
+      </div>
+      <div class="chart" id="chartGroup"></div>
+      <div class="table-wrap"><table id="groupTable"></table></div>
+      <p class="note">Moyenne ± écart-type sur les runs du groupe. Il faut au moins 2 runs par groupe pour un écart-type.</p>
+    </section>
+    <section>
+      <h2>Comportements par profil</h2>
+      <div class="row" style="margin-bottom:8px"><label class="f">Trait du profil <select id="trait"></select></label>
+        <label class="f">Runs <select id="traitRuns"><option value="all">tous les runs chargés</option><option value="sel">le run ouvert</option></select></label></div>
+      <div class="table-wrap"><table id="traitTable"></table></div>
+      <p class="note">Une ligne = tous les habitants qui ont cette valeur, sur tous les runs choisis (« habitants-runs »). Associations, pas causes isolées : les traits ne sont pas indépendants.</p>
+    </section>
+  </div>
+</main>
+
+<script>
+"use strict";
+// ---------- constantes ----------
+const STATES = ["home", "preparing", "walking", "blocked", "arrived", "sheltered", "victim"];
+const STATE_FR = {home: "chez soi", preparing: "se prépare", walking: "en route", blocked: "bloqué", arrived: "au refuge", sheltered: "à l'étage chez soi", victim: "victime"};
+const ENGINE_FR = {rule: "règles", big: "LLM grand", small: "LLM compact"};
+const SKIP_LIGHT = /"type": "(world\.tick|flood\.update|metrics|tick|agent\.belief|agent\.say|agent\.think|agent\.observe|message\.lost)"/;
+const KINDS = {decision: "Décision", belief: "Croyance", recu: "Message reçu", envoye: "Message envoyé", mairie: "Mairie / rumeur",
+  move: "Déplacement", obs: "Observation", danger: "Danger", perdu: "Message perdu", llm: "Incident LLM", maison: "Maison"};
+const KIND_COL = {decision: "--s-sheltered", belief: "--risk", recu: "--s-walking", envoye: "--s-walking", mairie: "--s-home", move: "--s-arrived", obs: "--s-preparing", danger: "--s-victim", perdu: "--warn", llm: "--bad", maison: "--s-blocked"};
+
+let runs = [];          // résumés légers de tous les runs chargés
+let cur = null;         // run ouvert, chargé en entier
+const $ = id => document.getElementById(id);
+const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+const hm = t => t == null ? "—" : `${String(Math.floor(t / 60)).padStart(2, "0")}:${String(Math.floor(t % 60)).padStart(2, "0")}`;
+const f1 = v => v == null || isNaN(v) ? "—" : (Math.round(v * 10) / 10).toLocaleString("fr-FR");
+const pct = (a, b) => b ? `${Math.round(100 * a / b)} %` : "—";
+const mean = a => a.length ? a.reduce((s, x) => s + x, 0) / a.length : null;
+const sd = a => { if (a.length < 2) return null; const m = mean(a); return Math.sqrt(a.reduce((s, x) => s + (x - m) ** 2, 0) / (a.length - 1)); };
+function el(tag, attrs, ...kids) {             // construit le DOM sans innerHTML : les textes des LLM restent du texte
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (k === "style") e.style.cssText = v; else if (k === "class") e.className = v; else if (k.startsWith("on")) e.addEventListener(k.slice(2), v); else e.setAttribute(k, v);
+  }
+  for (const k of kids.flat()) if (k != null && k !== false) e.append(k instanceof Node ? k : document.createTextNode(String(k)));
+  return e;
+}
+const svgEl = (tag, attrs) => { const e = document.createElementNS("http://www.w3.org/2000/svg", tag); for (const [k, v] of Object.entries(attrs || {})) e.setAttribute(k, v); return e; };
+const nameOf = (r, id) => id === "mairie" ? "la mairie" : id === "anonyme" ? "un anonyme" : (r.byId[id] ? `${r.byId[id].name} (${id})` : String(id));
+const clockOf = v => typeof v === "number" ? hm(v) : (v || "—");
+
+// ---------- chargement ----------
+$("pickFiles").onclick = () => $("files").click();
+$("pickDir").onclick = () => $("dir").click();
+$("files").onchange = e => addFiles([...e.target.files]);
+$("dir").onchange = e => addFiles([...e.target.files]);
+const drop = $("drop");
+drop.ondragover = e => { e.preventDefault(); drop.classList.add("over"); };
+drop.ondragleave = () => drop.classList.remove("over");
+drop.ondrop = e => { e.preventDefault(); drop.classList.remove("over"); addFiles([...e.dataTransfer.files]); };
+
+async function addFiles(list) {
+  list = list.filter(f => f.name.endsWith(".jsonl"));
+  if (!list.length) { status("Aucun fichier .jsonl dans la sélection."); return; }
+  let n = 0;
+  for (const f of list) {
+    status(`Lecture ${++n}/${list.length} : ${f.name}…`);
+    try { const r = await readLight(f); if (r) runs.push(r); } catch (ex) { console.warn(f.name, ex); }
+  }
+  runs.sort((a, b) => (a.group + a.id).localeCompare(b.group + b.id));
+  status(`${runs.length} run(s) chargé(s).`);
+  drop.classList.add("hidden");
+  fillRunSelect();
+  if (!cur && runs.length) await openRun(runs[0]);
+  renderParams();
+}
+function status(t) { $("status").textContent = t; }
+
+async function readLight(file) {
+  // Résumé d'un run : paramètres (run.start), issue de chaque habitant, bilan. On saute les événements lourds.
+  const text = await file.text(); let start = null, end = null;
+  const ag = {}, victims = new Set(), damage = {}, events = { depart: 0 }; let tLast = 0;
+  for (const line of text.split("\n")) {
+    if (!line || SKIP_LIGHT.test(line)) continue;
+    const e = JSON.parse(line); const d = e.data || {}; tLast = Math.max(tLast, e.t_sim || 0);
+    if (e.type === "run.start") { start = d; for (const a of d.agents) ag[a.id] = {dep: null, arr: null, refuge: null, state: "home"}; }
+    else if (e.type === "run.end") end = d;
+    else if (!start) continue;
+    else if (e.type === "agent.depart" && ag[e.agent]) { if (ag[e.agent].dep == null) ag[e.agent].dep = e.t_sim; ag[e.agent].state = "walking"; }
+    else if (e.type === "agent.arrive" && ag[e.agent]) { ag[e.agent].arr = e.t_sim; ag[e.agent].refuge = d.refuge; ag[e.agent].state = "arrived"; }
+    else if (e.type === "agent.shelter" && ag[e.agent]) ag[e.agent].state = "sheltered";
+    else if (e.type === "agent.victim") { victims.add(e.agent); if (ag[e.agent]) ag[e.agent].state = "victim"; }
+    else if (e.type === "house.damage") damage[d.house] = d.level;
+  }
+  if (!start) return null;
+  const heavy = ["streets", "heightmap", "map"]; const s = {}; for (const k in start) if (!heavy.includes(k)) s[k] = start[k];
+  if (end) for (const a of end.agents || []) if (ag[a.id]) Object.assign(ag[a.id], {state: victims.has(a.id) ? "victim" : a.state, wet: a.wet, via: a.via});
+  const n = s.agents.length, ind = end ? end.indicators : null;
+  const cnt = st => Object.values(ag).filter(a => a.state === st).length;
+  const deps = Object.values(ag).filter(a => a.dep != null).map(a => a.dep - 540);
+  const dmg = {legers: 0, graves: 0, sinistree: 0}; for (const v of Object.values(damage)) if (v in dmg) dmg[v]++;
+  const path = file._path || file.webkitRelativePath || file.name; const parts = path.split("/");
+  return {file, id: s.run_id || file.name.replace(".jsonl", ""), name: file.name, group: parts.length > 1 ? parts[parts.length - 2] : "", start: s, end, complete: !!end, tLast,
+    agents: ag, victims, n,
+    m: {safe_pct: 100 * cnt("arrived") / n, sheltered_pct: 100 * cnt("sheltered") / n, victims: victims.size, sinistree: dmg.sinistree, graves: dmg.graves,
+        depart_avg: mean(deps), departed_pct: 100 * deps.length / n, common_context_avg: ind ? 100 * ind.common_context_avg : null,
+        exact_bridge: ind ? 100 * ind.exact_bridge : null, wet_avg: ind ? ind.wet_avg_min : null, calls: end ? end.calls_total : null}};
+}
+
+async function readFull(r) {
+  // Tout le run : positions à chaque tick (tableaux compacts), crue, et tous les événements pour le suivi.
+  status(`Ouverture de ${r.name}…`);
+  const text = await r.file.text();
+  const full = {ticks: [], floods: [], events: [], start: null, end: null};
+  for (const line of text.split("\n")) {
+    if (!line) continue;
+    const e = JSON.parse(line); const d = e.data || {};
+    if (e.type === "run.start") { full.start = d; full.idx = Object.fromEntries(d.agents.map((a, i) => [a.id, i])); }
+    else if (!full.start) continue;
+    else if (e.type === "world.tick") {
+      const n = full.start.agents.length, tk = {t: e.t_sim, level: d.level, x: new Float32Array(n), z: new Float32Array(n), s: new Uint8Array(n), d: new Float32Array(n), w: new Float32Array(n), f: new Uint8Array(n)};
+      for (const p of d.agents) { const i = full.idx[p.id]; if (i == null) continue; tk.x[i] = p.x; tk.z[i] = p.z; tk.s[i] = Math.max(0, STATES.indexOf(p.state)); tk.d[i] = p.depth || 0; tk.w[i] = p.wet || 0; tk.f[i] = p.distress ? 1 : 0; }
+      full.ticks.push(tk);
+    }
+    else if (e.type === "flood.update") full.floods.push({t: e.t_sim, level: d.level, cells: Int16Array.from(d.cells)});
+    else if (e.type === "metrics" || e.type === "tick") continue;
+    else { if (e.type === "run.end") full.end = d; full.events.push(e); }
+  }
+  full.byId = Object.fromEntries(full.start.agents.map(a => [a.id, a]));
+  status(`${runs.length} run(s) chargé(s) · ouvert : ${r.id}`);
+  return Object.assign(full, {light: r, id: r.id});
+}
+
+function fillRunSelect() {
+  const sel = $("runSel"); sel.textContent = "";
+  runs.forEach((r, i) => sel.append(el("option", {value: i}, `${r.group ? r.group + " / " : ""}${r.id}${r.complete ? "" : " (incomplet)"}`)));
+  sel.onchange = () => openRun(runs[+sel.value]);
+}
+async function openRun(r) {
+  stopPlay(); cur = await readFull(r); $("runSel").value = runs.indexOf(r);
+  selAgent = null; setupReplay(); renderAgentTable(); $("agDetail").classList.add("hidden");
+  renderTraits(); showTab(tab);
+}
+
+// ---------- onglets ----------
+document.querySelectorAll("#tabs button").forEach(b => b.onclick = () => showTab(b.dataset.tab));
+let tab = "overview";
+function showTab(t) {
+  tab = t;
+  document.querySelectorAll("#tabs button").forEach(b => b.classList.toggle("on", b.dataset.tab === t));
+  document.querySelectorAll(".tab").forEach(d => d.classList.toggle("hidden", d.id !== "tab-" + t || !runs.length));
+  renderTab();
+}
+function renderTab() {                                            // les graphiques se dessinent une fois visibles (largeur connue)
+  if (!cur) return;
+  if (tab === "overview") renderOverview();
+  else if (tab === "replay") drawMap();
+  else if (tab === "agents" && selAgent && !$("agDetail").classList.contains("hidden")) openAgent(selAgent, false);
+  else if (tab === "params") renderGroups();
+}
+
+// ---------- graphiques (SVG, sans bibliothèque) ----------
+function frame(host, H) {
+  host.textContent = "";
+  const W = Math.max(320, host.clientWidth || 600), m = {l: 40, r: 12, t: 8, b: 22};
+  const svg = svgEl("svg", {viewBox: `0 0 ${W} ${H}`, role: "img"}); host.append(svg);
+  const tip = el("div", {class: "tip"}); host.append(tip);
+  return {svg, tip, W, H, m, iw: W - m.l - m.r, ih: H - m.t - m.b};
+}
+function axes(F, x0, x1, yMax, yFmt, tickEvery) {
+  const {svg, m, iw, ih} = F;
+  for (let k = 0; k <= 4; k++) {                              // grille horizontale discrète
+    const y = m.t + ih - ih * k / 4;
+    svg.append(svgEl("line", {x1: m.l, x2: m.l + iw, y1: y, y2: y, stroke: "var(--grid)", "stroke-width": 1}));
+    const t = svgEl("text", {x: m.l - 6, y: y + 4, "text-anchor": "end"}); t.textContent = yFmt(yMax * k / 4); svg.append(t);
+  }
+  if (tickEvery === 0) return;                                  // graphique en barres : pas d'axe du temps
+  const step = tickEvery || (x1 - x0 > 45 ? 10 : 5);
+  for (let v = Math.ceil(x0 / step) * step; v <= x1; v += step) {
+    const x = m.l + iw * (v - x0) / (x1 - x0 || 1);
+    const t = svgEl("text", {x, y: m.t + ih + 16, "text-anchor": "middle"}); t.textContent = hm(v); svg.append(t);
+  }
+}
+function crosshair(F, xs, x0, x1, render) {
+  // Ligne verticale qui suit la souris et se cale sur la donnée la plus proche ; une info-bulle liste toutes les séries.
+  const {svg, tip, m, iw, ih, W} = F;
+  const line = svgEl("line", {y1: m.t, y2: m.t + ih, stroke: "var(--muted)", "stroke-width": 1, "stroke-dasharray": "3 3", visibility: "hidden"}); svg.append(line);
+  const hit = svgEl("rect", {x: m.l, y: m.t, width: iw, height: ih, fill: "transparent", tabindex: 0}); svg.append(hit);
+  const at = clientX => {
+    const box = svg.getBoundingClientRect(), px = (clientX - box.left) * W / box.width, t = x0 + (px - m.l) / iw * (x1 - x0);
+    let lo = 0, hi = xs.length - 1; while (hi - lo > 1) { const mid = (lo + hi) >> 1; if (xs[mid] < t) lo = mid; else hi = mid; }
+    const i = Math.abs(xs[lo] - t) <= Math.abs(xs[hi] - t) ? lo : hi, x = m.l + iw * (xs[i] - x0) / (x1 - x0 || 1);
+    line.setAttribute("x1", x); line.setAttribute("x2", x); line.setAttribute("visibility", "visible");
+    tip.textContent = ""; tip.append(...render(i)); tip.style.display = "block";
+    const left = x * box.width / W; tip.style.left = (left + 12 + tip.offsetWidth > box.width ? left - tip.offsetWidth - 12 : left + 12) + "px"; tip.style.top = "6px";
+  };
+  hit.addEventListener("pointermove", e => at(e.clientX));
+  hit.addEventListener("pointerleave", () => { line.setAttribute("visibility", "hidden"); tip.style.display = "none"; });
+  hit.addEventListener("focus", () => { const b = svg.getBoundingClientRect(); at(b.left + b.width / 2); });
+  hit.addEventListener("blur", () => { line.setAttribute("visibility", "hidden"); tip.style.display = "none"; });
+}
+const tipRow = (col, val, label) => el("div", {class: "r"}, el("i", {style: `background:${col}`}), el("b", {}, val), el("span", {class: "muted"}, label));
+
+function stackChart(host, xs, series, H = 220) {
+  // Aire empilée des états : une couleur par état, 1 px d'écart entre les bandes.
+  const F = frame(host, H), x0 = xs[0], x1 = xs[xs.length - 1], total = Math.max(1, ...xs.map((_, i) => STATES.reduce((s, k) => s + series[k][i], 0)));
+  axes(F, x0, x1, total, v => Math.round(v));
+  const X = t => F.m.l + F.iw * (t - x0) / (x1 - x0 || 1), Y = v => F.m.t + F.ih - F.ih * v / total;
+  const base = xs.map(() => 0);
+  for (const k of STATES) {
+    if (!series[k].some(v => v > 0)) continue;
+    const top = base.map((b, i) => b + series[k][i]);
+    let d = `M${X(xs[0])},${Y(top[0])}`; for (let i = 1; i < xs.length; i++) d += `L${X(xs[i])},${Y(top[i])}`;
+    for (let i = xs.length - 1; i >= 0; i--) d += `L${X(xs[i])},${Y(base[i])}`;
+    F.svg.append(svgEl("path", {d: d + "Z", fill: `var(--s-${k})`, stroke: "var(--panel)", "stroke-width": 1}));
+    top.forEach((v, i) => base[i] = v);
+  }
+  crosshair(F, xs, x0, x1, i => [el("div", {}, el("b", {}, hm(xs[i]))), ...STATES.filter(k => series[k][i] > 0).map(k => tipRow(`var(--s-${k})`, series[k][i], STATE_FR[k]))]);
+}
+function lineChart(host, xs, ys, {H = 160, color = "var(--water)", fmt = f1, label = "", yMax, step = false, x0, x1} = {}) {
+  const F = frame(host, H); x0 = x0 ?? xs[0]; x1 = x1 ?? xs[xs.length - 1];
+  if (!xs.length) { F.svg.append(Object.assign(svgEl("text", {x: F.W / 2, y: H / 2, "text-anchor": "middle"}), {textContent: "aucune donnée"})); return; }
+  const top = yMax ?? Math.max(1e-6, ...ys) * 1.1; axes(F, x0, x1, top, fmt);
+  const X = t => F.m.l + F.iw * (t - x0) / (x1 - x0 || 1), Y = v => F.m.t + F.ih - F.ih * Math.max(0, v) / top;
+  let d = `M${X(xs[0])},${Y(ys[0])}`;
+  for (let i = 1; i < xs.length; i++) d += step ? `H${X(xs[i])}V${Y(ys[i])}` : `L${X(xs[i])},${Y(ys[i])}`;
+  if (step) d += `H${X(x1)}`;
+  F.svg.append(svgEl("path", {d, fill: "none", stroke: color, "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round"}));
+  crosshair(F, xs, x0, x1, i => [el("div", {}, el("b", {}, hm(xs[i]))), tipRow(color, fmt(ys[i]), label)]);
+}
+function stateStrip(host, segs, x0, x1) {
+  // Bande horizontale : l'état de l'habitant, de 09:00 à la fin.
+  const F = frame(host, 46); F.m.t = 4; F.ih = 18; F.m.b = 24;
+  const X = t => F.m.l + F.iw * (t - x0) / (x1 - x0 || 1);
+  segs.forEach(s => {
+    const r = svgEl("rect", {x: X(s.a), y: F.m.t, width: Math.max(1, X(s.b) - X(s.a) - 1), height: F.ih, rx: 3, fill: `var(--s-${s.st})`});
+    r.addEventListener("pointermove", () => { F.tip.textContent = ""; F.tip.append(el("div", {}, el("b", {}, STATE_FR[s.st])), el("div", {class: "muted"}, `${hm(s.a)} → ${hm(s.b)}`)); F.tip.style.display = "block"; F.tip.style.left = X(s.a) * F.svg.getBoundingClientRect().width / F.W + "px"; F.tip.style.top = "26px"; });
+    r.addEventListener("pointerleave", () => F.tip.style.display = "none");
+    F.svg.append(r);
+  });
+  for (let v = Math.ceil(x0 / 10) * 10; v <= x1; v += 10) F.svg.append(Object.assign(svgEl("text", {x: X(v), y: 40, "text-anchor": "middle"}), {textContent: hm(v)}));
+}
+function barChart(host, items, fmt, isPct) {
+  // Une barre par groupe, valeur directement écrite au-dessus ; l'écart-type en fine moustache.
+  const top = Math.max(1e-6, ...items.map(i => (i.v ?? 0) + (i.sd ?? 0))) * 1.12, F = frame(host, 220), max = isPct ? Math.min(100, Math.max(top, 10)) : top;
+  axes(F, 0, 1, max, fmt, 0);
+  const bw = Math.min(56, F.iw / items.length * .6);
+  items.forEach((it, k) => {
+    if (it.v == null) return;
+    const cx = F.m.l + F.iw * (k + .5) / items.length, y = F.m.t + F.ih - F.ih * it.v / max;
+    const bar = svgEl("path", {d: `M${cx - bw / 2},${F.m.t + F.ih}V${y + 4}Q${cx - bw / 2},${y} ${cx - bw / 2 + 4},${y}H${cx + bw / 2 - 4}Q${cx + bw / 2},${y} ${cx + bw / 2},${y + 4}V${F.m.t + F.ih}Z`, fill: "var(--s-walking)", tabindex: 0});
+    F.svg.append(bar);
+    if (it.sd) { const y1 = F.m.t + F.ih - F.ih * (it.v + it.sd) / max, y2 = F.m.t + F.ih - F.ih * Math.max(0, it.v - it.sd) / max; F.svg.append(svgEl("line", {x1: cx, x2: cx, y1, y2, stroke: "var(--text)", "stroke-width": 1})); }
+    F.svg.append(Object.assign(svgEl("text", {x: cx, y: y - 6, "text-anchor": "middle", style: "fill:var(--text)"}), {textContent: fmt(it.v)}));
+    const lab = svgEl("text", {x: cx, y: F.m.t + F.ih + 16, "text-anchor": "middle"}); lab.textContent = it.label.length > 18 ? it.label.slice(0, 17) + "…" : it.label; F.svg.append(lab);
+    const show = () => { F.tip.textContent = ""; F.tip.append(el("div", {}, el("b", {}, fmt(it.v)), it.sd != null ? ` ± ${fmt(it.sd)}` : ""), el("div", {class: "muted"}, `${it.label} · ${it.n} run(s)`)); F.tip.style.display = "block"; F.tip.style.left = (cx * F.svg.getBoundingClientRect().width / F.W) + "px"; F.tip.style.top = "0px"; };
+    bar.addEventListener("pointermove", show); bar.addEventListener("focus", show);
+    bar.addEventListener("pointerleave", () => F.tip.style.display = "none"); bar.addEventListener("blur", () => F.tip.style.display = "none");
+  });
+}
+function legend(host, keys) { host.textContent = ""; keys.forEach(k => host.append(el("span", {}, el("i", {style: `background:var(--s-${k})`}), STATE_FR[k]))); }
+
+// ---------- vue d'ensemble ----------
+function runParams(s) {
+  const c = s.crue || {};
+  return [["Run", s.run_id || cur.id], ["Scénario", s.scenario], ["Crue", `${c.type || "?"} (débordement ${hm(c.t_bank)}, pic ${hm(c.t_peak)}, ${f1(c.peak)} m)`],
+    ["Alerte d'évacuation", clockOf(s.update_at)], ["Rumeur", clockOf(s.rumor_at)], ["Pont fermé à", s.bridge_close_at ? hm(s.bridge_close_at) : "jamais"],
+    ["Panne du réseau", s.panne_reseau], ["Mode", s.mode], ["Graine", s.seed], ["Habitants", s.n_agents],
+    ["Habitants LLM", (s.llm_agents || []).join(", ") || "aucun (100 % règles)"], ["Modèles", s.models ? `${s.models.big} / ${s.models.small}` : "—"],
+    ["API LLM", (s.apis || []).map(a => a.name).join(", ") || "—"], ["Vitesse", `×${s.time_scale}`], ["Réglages de la page Villageois", s.custom ? "oui" : "non"]];
+}
+function renderOverview() {
+  const s = cur.start, L = cur.light, e = cur.end;
+  const kv = $("params"); kv.textContent = ""; runParams(s).forEach(([k, v]) => kv.append(el("dt", {}, k), el("dd", {}, v ?? "—")));
+  const tiles = $("tiles"); tiles.textContent = "";
+  const T = (v, l) => tiles.append(el("div", {class: "tile"}, el("b", {}, v), el("span", {}, l)));
+  T(`${Math.round(L.m.safe_pct)} %`, "au refuge"); T(`${Math.round(L.m.sheltered_pct)} %`, "à l'étage chez soi"); T(L.m.victims, "victime(s)");
+  T(L.m.sinistree, "maisons sinistrées"); T(L.m.graves, "maisons, dégâts graves"); T(L.m.depart_avg == null ? "—" : `+${f1(L.m.depart_avg)} min`, "départ moyen après 09:00");
+  T(L.m.common_context_avg == null ? "—" : `${Math.round(L.m.common_context_avg)} %`, "contexte commun moyen"); T(f1(L.m.wet_avg), "min dans l'eau (moy.)");
+  T(e ? e.calls_total : "—", "appels LLM"); if (!L.complete) T("incomplet", `run arrêté à ${hm(L.tLast)}`);
+  // états au fil du temps : au plus 400 points
+  const tk = cur.ticks, stepK = Math.max(1, Math.ceil(tk.length / 400)), pick = tk.filter((_, i) => i % stepK === 0 || i === tk.length - 1);
+  const series = Object.fromEntries(STATES.map(k => [k, []]));
+  pick.forEach(t => { const c = new Array(STATES.length).fill(0); t.s.forEach(v => c[v]++); STATES.forEach((k, i) => series[k].push(c[i])); });
+  legend($("stateLegend"), STATES.filter(k => series[k].some(v => v > 0)));
+  if (pick.length > 1) stackChart($("chartStates"), pick.map(t => t.t), series); else $("chartStates").textContent = "Pas de positions enregistrées.";
+  const fl = cur.floods.length ? cur.floods : pick.map(t => ({t: t.t, level: t.level}));
+  lineChart($("chartLevel"), fl.map(f => f.t), fl.map(f => f.level), {label: "niveau (m)", fmt: v => f1(v)});
+  const deps = cur.events.filter(e => e.type === "agent.depart").map(e => e.t_sim).sort((a, b) => a - b), seen = new Set(), dx = [], dy = [];
+  cur.events.filter(e => e.type === "agent.depart").forEach(e => { if (!seen.has(e.agent)) { seen.add(e.agent); dx.push(e.t_sim); dy.push(seen.size); } });
+  const xEnd = tk.length ? tk[tk.length - 1].t : (deps[deps.length - 1] || 600);
+  lineChart($("chartDeparts"), [540, ...dx], [0, ...dy], {color: "var(--s-walking)", label: "habitants partis", fmt: v => Math.round(v), step: true, x0: 540, x1: xEnd, yMax: s.n_agents});
+  const ke = $("keyEvents"); ke.textContent = ""; let first = null; const full = new Set();
+  for (const ev of cur.events) {
+    const d = ev.data; let k = null, txt = null;
+    if (ev.type === "official.bulletin") { k = "mairie"; txt = [`Bulletin ${d.level} : `, el("q", {}, d.text), ` — reçu par ${(d.to || []).length}, manqué par ${(d.missed || []).length}`]; }
+    else if (ev.type === "rumor") { k = "mairie"; txt = [`Rumeur ${d.true ? "vraie" : "fausse"} envoyée à ${d.targets.map(x => nameOf(cur, x)).join(", ")} : `, el("q", {}, d.text)]; }
+    else if (ev.type === "bridge.closed") { k = "move"; txt = "Le Pont Central est fermé (vérité du monde)."; }
+    else if (ev.type === "network.down") { k = "danger"; txt = "Réseau mobile coupé : plus de téléphone ni de groupe."; }
+    else if (ev.type === "world.truth") { k = "obs"; txt = `Vérité : pont ${d.bridge}, danger ${d.danger ? "oui" : "non"}, refuges accessibles : ${d.refuges.length ? d.refuges.join(", ") : "aucun"}`; }
+    else if (ev.type === "refuge.full" && !full.has(d.refuge)) { full.add(d.refuge); k = "danger"; txt = `Refuge plein : ${d.refuge} (premier habitant refoulé : ${nameOf(cur, ev.agent)})`; }
+    else if (ev.type === "agent.victim") { k = "danger"; txt = `Victime : ${nameOf(cur, ev.agent)} — ${d.reason}`; }
+    else if (ev.type === "house.damage" && d.level === "sinistree" && !first) { first = 1; k = "maison"; txt = `Première maison sinistrée (foyer ${d.house}, ${Math.round(d.depth * 100)} cm)`; }
+    else if (ev.type === "run.end") { k = "obs"; txt = "Fin du run."; }
+    if (k) ke.append(jLine(ev.t_sim, k, txt));
+  }
+}
+function jLine(t, k, txt) {
+  return el("div", {class: "e"}, el("span", {class: "t"}, hm(t)), el("span", {class: "k"}, el("span", {class: "dot", style: `background:var(${KIND_COL[k]})`}), KINDS[k]), el("span", {class: "x"}, txt));
+}
+
+// ---------- rejeu ----------
+let frameI = 0, playing = false, timer = null, selAgent = null, mapGeo = null;
+function setupReplay() {
+  const sc = $("scrub"); sc.max = Math.max(0, cur.ticks.length - 1); sc.value = 0; frameI = 0;
+  sc.oninput = () => { frameI = +sc.value; drawMap(); };
+  const lg = $("mapLegend"); legend(lg, STATES); lg.append(el("span", {}, el("i", {style: "background:none;border:2px solid var(--bad);border-radius:50%;width:10px"}), "en danger"));
+  mapGeo = geo(cur.start); drawMap();
+}
+$("play").onclick = () => playing ? stopPlay() : startPlay();
+function startPlay() {
+  if (!cur || !cur.ticks.length) return;
+  if (frameI >= cur.ticks.length - 1) frameI = 0;
+  playing = true; $("play").textContent = "Pause"; let last = performance.now(), simT = cur.ticks[frameI].t;
+  const loop = now => {
+    if (!playing) return;
+    simT += (now - last) / 1000 * +$("speed").value / 60; last = now;       // vitesse ×N : N secondes simulées par seconde réelle
+    let moved = false;
+    while (frameI < cur.ticks.length - 1 && cur.ticks[frameI + 1].t <= simT) { frameI++; moved = true; }
+    if (moved) { $("scrub").value = frameI; drawMap(); }
+    if (frameI >= cur.ticks.length - 1) return stopPlay();
+    timer = requestAnimationFrame(loop);
+  };
+  timer = requestAnimationFrame(loop);
+}
+function stopPlay() { playing = false; $("play").textContent = "Lecture"; if (timer) cancelAnimationFrame(timer); }
+
+function geo(s) {
+  const m = s.map, nodes = s.streets.nodes;
+  let x0 = m.x0, x1 = m.x1, z0 = m.z0, z1 = m.z1;
+  for (const [x, z] of Object.values(nodes)) { x0 = Math.min(x0, x); x1 = Math.max(x1, x); z0 = Math.min(z0, z); z1 = Math.max(z1, z); }
+  return {m, x0: x0 - 4, x1: x1 + 4, z0: z0 - 4, z1: z1 + 4};
+}
+function prep(cv) {
+  const r = cv.getBoundingClientRect(), dpr = window.devicePixelRatio || 1, G = mapGeo || (cur && geo(cur.start));
+  const h = G ? Math.round(Math.min(+cv.getAttribute("height"), Math.max(200, r.width * (G.z1 - G.z0) / (G.x1 - G.x0)))) : +cv.getAttribute("height");   // hauteur aux proportions du quartier
+  cv.width = Math.round(r.width * dpr); cv.height = Math.round(h * dpr); cv.style.height = h + "px";
+  const c = cv.getContext("2d"); c.setTransform(dpr, 0, 0, dpr, 0, 0); return {c, w: r.width, h};
+}
+function mapper(G, w, h) {
+  const s = Math.min(w / (G.x1 - G.x0), h / (G.z1 - G.z0)), ox = (w - s * (G.x1 - G.x0)) / 2, oz = (h - s * (G.z1 - G.z0)) / 2;
+  return {s, P: (x, z) => [ox + (x - G.x0) * s, oz + (z - G.z0) * s], inv: (px, pz) => [(px - ox) / s + G.x0, (pz - oz) / s + G.z0]};
+}
+function drawBase(c, M, G, t) {
+  const st = cur.start, m = G.m;
+  c.fillStyle = css("--panel"); c.fillRect(0, 0, 4000, 4000);
+  const fl = [...cur.floods].reverse().find(f => f.t <= t);
+  const water = css("--water");
+  if (fl) {                                                       // hauteur d'eau par case de 5 m : bleu plus soutenu = plus profond
+    c.fillStyle = water;
+    for (let k = 0; k < m.nz; k++) for (let i = 0; i < m.nx; i++) {
+      const cm = fl.cells[k * m.nx + i]; if (cm <= 0) continue;
+      c.globalAlpha = Math.min(.85, .12 + cm / 100); const [px, pz] = M.P(m.x0 + i * m.cell, m.z0 + k * m.cell); c.fillRect(px, pz, m.cell * M.s + .5, m.cell * M.s + .5);
+    }
+    c.globalAlpha = 1;
+  }
+  const [rx0, rz0] = M.P(G.x0, m.river_z - m.river_w / 2), [rx1, rz1] = M.P(G.x1, m.river_z + m.river_w / 2);
+  c.fillStyle = water; c.globalAlpha = .55; c.fillRect(rx0, rz0, rx1 - rx0, rz1 - rz0); c.globalAlpha = 1;
+  c.strokeStyle = css("--line"); c.lineCap = "round";
+  for (const [a, b, w, nm] of st.streets.edges) {
+    const A = st.streets.nodes[a], B = st.streets.nodes[b]; if (!A || !B) continue;
+    const [ax, az] = M.P(A[0], A[1]), [bx, bz] = M.P(B[0], B[1]);
+    c.lineWidth = Math.max(1.5, w * M.s * .5); c.strokeStyle = /Pont|Passage/.test(nm) ? css("--muted") : css("--line");
+    c.beginPath(); c.moveTo(ax, az); c.lineTo(bx, bz); c.stroke();
+  }
+  c.font = "11px system-ui"; c.textAlign = "center";
+  for (const r of st.refuges) {
+    const [px, pz] = M.P(r.x, r.z); c.strokeStyle = css("--s-arrived"); c.lineWidth = 2;
+    c.beginPath(); c.arc(px, pz, Math.max(6, r.radius * M.s), 0, 7); c.stroke(); c.fillStyle = css("--text"); c.fillText(r.name, px, pz - Math.max(8, r.radius * M.s) - 3);
+  }
+}
+function drawMap() {
+  if (!cur || !mapGeo || $("tab-replay").classList.contains("hidden")) return;
+  const cv = $("map"), {c, w, h} = prep(cv), M = mapper(mapGeo, w, h), tk = cur.ticks[frameI];
+  if (!tk) { c.fillStyle = css("--muted"); c.fillText("Pas de positions enregistrées dans ce run.", 20, 30); return; }
+  drawBase(c, M, mapGeo, tk.t); cur._M = M;
+  const cols = STATES.map(k => css("--s-" + k)), n = cur.start.agents.length, si = selAgent != null ? cur.idx[selAgent] : -1;
+  if (si >= 0) {                                                  // trace de l'habitant sélectionné jusqu'à maintenant
+    c.strokeStyle = css("--text"); c.lineWidth = 1.5; c.globalAlpha = .7; c.beginPath();
+    for (let k = 0; k <= frameI; k++) { const [px, pz] = M.P(cur.ticks[k].x[si], cur.ticks[k].z[si]); k ? c.lineTo(px, pz) : c.moveTo(px, pz); }
+    c.stroke(); c.globalAlpha = 1;
+  }
+  for (let i = 0; i < n; i++) {
+    const [px, pz] = M.P(tk.x[i], tk.z[i]);
+    c.fillStyle = cols[tk.s[i]]; c.strokeStyle = css("--panel"); c.lineWidth = 1.5;
+    c.beginPath(); c.arc(px, pz, i === si ? 7 : 4.5, 0, 7); c.fill(); c.stroke();
+    if (tk.f[i]) { c.strokeStyle = css("--bad"); c.lineWidth = 2; c.beginPath(); c.arc(px, pz, 8, 0, 7); c.stroke(); }
+  }
+  if (si >= 0) { const [px, pz] = M.P(tk.x[si], tk.z[si]); c.strokeStyle = css("--text"); c.lineWidth = 2; c.beginPath(); c.arc(px, pz, 10, 0, 7); c.stroke(); }
+  $("clock").textContent = hm(tk.t) + ` · eau ${f1(tk.level)} m`;
+  const cnt = new Array(STATES.length).fill(0); tk.s.forEach(v => cnt[v]++);
+  renderMapSide(tk);
+}
+$("map").addEventListener("click", e => {
+  if (!cur || !cur._M) return; const r = e.target.getBoundingClientRect(), tk = cur.ticks[frameI]; if (!tk) return;
+  let best = -1, bd = 14 * 14;                                     // l'habitant le plus proche du clic, dans un rayon de 14 px
+  for (let i = 0; i < tk.x.length; i++) { const [px, pz] = cur._M.P(tk.x[i], tk.z[i]); const d = (px - (e.clientX - r.left)) ** 2 + (pz - (e.clientY - r.top)) ** 2; if (d < bd) { bd = d; best = i; } }
+  selAgent = best >= 0 ? cur.start.agents[best].id : null; drawMap();
+});
+function renderMapSide(tk) {
+  const box = $("mapSel"); box.textContent = "";
+  if (selAgent) {
+    const a = cur.byId[selAgent], i = cur.idx[selAgent];
+    box.append(el("div", {}, el("b", {}, `${a.name} (${a.id})`), ` · ${ENGINE_FR[a.engine] || a.engine}`),
+      el("div", {}, el("span", {class: "dot", style: `background:var(--s-${STATES[tk.s[i]]})`}), STATE_FR[STATES[tk.s[i]]], ` · ${Math.round(tk.d[i] * 100)} cm d'eau · ${f1(tk.w[i])} min dans l'eau`),
+      el("div", {class: "muted"}, a.situation || ""), el("button", {style: "margin-top:6px", onclick: () => { showTab("agents"); openAgent(selAgent); }}, "Voir son suivi complet"));
+  } else box.append("Aucun. Cliquez sur un point de la carte.");
+  const feed = $("mapFeed"); feed.textContent = "";
+  const recent = journalAll().filter(j => j.t <= tk.t && (!selAgent || j.who.includes(selAgent))).slice(-14).reverse();
+  recent.forEach(j => feed.append(jLine(j.t, j.k, j.txt)));
+}
+
+// ---------- suivi de chaque habitant ----------
+function journalAll() {
+  // Toutes les lignes de journal du run, avec les habitants concernés (who) : construit une fois, puis filtré.
+  if (cur._journal) return cur._journal;
+  const J = [], N = id => nameOf(cur, id), add = (t, k, who, txt, raw) => J.push({t, k, who, txt, raw});
+  for (const ev of cur.events) {
+    const d = ev.data || {}, a = ev.agent, t = ev.t_sim;
+    switch (ev.type) {
+      case "agent.think": add(t, "decision", [a], [el("b", {}, `${N(a)} décide : ${d.action}`), " — ", el("q", {}, d.why), el("span", {class: "muted"}, ` [${d.decider === "rule" ? "règles" : (d.model || d.decider)}${d.latency_ms ? `, ${Math.round(d.latency_ms / 100) / 10} s` : ""}${d.risk != null ? `, risque ${d.risk}` : ""}]`)], `${d.action} | ${d.why}`); break;
+      case "agent.belief": add(t, "belief", [a], `${N(a)} croit : pont ${d.bridge}, refuge ${d.refuge}, danger ${d.danger ? "oui" : "non"}, risque ${d.risk}/100${d.certainty != null ? `, certitude ${f1(d.certainty)}` : ""}`, `pont ${d.bridge} refuge ${d.refuge} danger ${d.danger} risque ${d.risk}`); break;
+      case "agent.say": {
+        const ca = d.canaux || {};
+        add(t, "envoye", [a], [`${N(a)} → ${d.to.map(N).join(", ")} (${d.kind}${d.origin && d.origin !== a ? `, source ${N(d.origin)}` : ""}) : `, el("q", {}, d.text)], `${d.kind} → ${d.to.join(" ")} | ${d.text}`);
+        for (const r of d.to) J.push({t, k: "recu", who: [r], txt: [`de ${N(a)} (${d.kind}, ${(ca[r] || "?").replace("_", " ")}) : `, el("q", {}, d.text)], raw: `${d.kind} de ${a} | ${d.text}`, only: r});
+        break; }
+      case "message.lost": add(t, "perdu", [a, ...(d.to || [])], `${N(a)} n'arrive pas à joindre ${(d.to || []).map(N).join(", ")} (${d.reason})`, `perdu ${d.reason}`); break;
+      case "official.bulletin":
+        for (const r of d.to || []) J.push({t, k: "mairie", who: [r], txt: [`reçoit le bulletin ${d.level} (${(d.canaux || {})[r] || "?"}) : `, el("q", {}, d.text)], raw: `bulletin ${d.level} reçu`});
+        for (const r of d.missed || []) J.push({t, k: "mairie", who: [r], txt: `ne reçoit pas le bulletin ${d.level}`, raw: `bulletin ${d.level} manqué`});
+        J.push({t, k: "mairie", who: [], txt: [`Bulletin ${d.level} : `, el("q", {}, d.text)], raw: d.text}); break;
+      case "rumor": for (const r of d.targets) J.push({t, k: "mairie", who: [r], txt: [`reçoit une rumeur anonyme (${d.true ? "vraie" : "fausse"}) : `, el("q", {}, d.text)], raw: `rumeur ${d.text}`}); break;
+      case "agent.prepare": add(t, "move", [a], `${N(a)} prépare son départ (prêt à ${hm(d.ready_at)})${d.refuge ? `, refuge visé : ${d.refuge}` : ""}`, `prépare ${hm(d.ready_at)}`); break;
+      case "agent.depart": add(t, "move", [a], `${N(a)} part vers ${d.refuge} par ${String(d.via).replace(/_/g, " ")}${d.why ? ` — ${d.why}` : ""}`, `part ${d.refuge} ${d.via}`); break;
+      case "agent.reroute": add(t, "move", [a], `${N(a)} change de chemin (${d.reason}) → ${d.refuge || "chez soi"}`, `détour ${d.reason}`); break;
+      case "agent.arrive": add(t, "move", [a], `${N(a)} arrive au refuge ${d.refuge}${d.load != null ? ` (${d.load}/${d.cap})` : ""}`, `arrive ${d.refuge}`); break;
+      case "agent.blocked": add(t, "danger", [a], `${N(a)} est bloqué : ${d.reason}`, `bloqué ${d.reason}`); break;
+      case "agent.shelter": add(t, "move", [a], `${N(a)} se met à l'abri à l'étage : ${d.reason}`, `à l'étage ${d.reason}`); break;
+      case "agent.observe": add(t, "obs", [a], `${N(a)} voit ${d.what === "eau" ? `de l'eau (${Math.round((d.depth || 0) * 100)} cm)` : d.what === "pont_ferme" ? "le pont fermé" : d.what === "rue_inondee" ? `la rue inondée${d.street ? ` (${d.street})` : ""}` : d.what}`, `voit ${d.what}`); break;
+      case "agent.verify": add(t, "decision", [a], `${N(a)} appelle le poste municipal (jusqu'à ${hm(d.until)})`, "vérifie"); break;
+      case "agent.verify_result": add(t, "decision", [a], `${N(a)} obtient la réponse : ${d.result}`, `réponse ${d.result}`); break;
+      case "agent.distress": add(t, "danger", [a], `${N(a)} est en danger : ${d.reason}`, `en danger ${d.reason}`); break;
+      case "agent.distress_end": add(t, "danger", [a], `${N(a)} n'est plus en danger`, "plus en danger"); break;
+      case "agent.victim": add(t, "danger", [a], `${N(a)} devient victime : ${d.reason} (en danger depuis ${Math.round(d.minutes)} min)`, `victime ${d.reason}`); break;
+      case "refuge.full": add(t, "danger", [a], `${N(a)} trouve le refuge ${d.refuge} plein`, `refuge plein ${d.refuge}`); break;
+      case "llm.incident": add(t, "llm", [a], `Incident LLM pour ${N(a)} : ${d.kind}${d.detail ? ` — ${String(d.detail).slice(0, 140)}` : ""}`, `incident ${d.kind}`); break;
+      case "house.damage": add(t, "maison", d.agents || [], `Maison du foyer ${d.house} : dégâts ${d.level === "sinistree" ? "« maison sinistrée »" : d.level} (${Math.round(d.depth * 100)} cm devant la porte)`, `maison ${d.level}`); break;
+    }
+  }
+  return (cur._journal = J);
+}
+
+let agSort = {k: "id", dir: 1};
+function agentRows() {
+  const L = cur.light, think = {}, sent = {}, recv = {};
+  for (const ev of cur.events) {
+    if (ev.type === "agent.think") think[ev.agent] = (think[ev.agent] || 0) + 1;
+    if (ev.type === "agent.say") { sent[ev.agent] = (sent[ev.agent] || 0) + 1; for (const r of ev.data.to) recv[r] = (recv[r] || 0) + 1; }
+  }
+  return cur.start.agents.map(a => { const o = L.agents[a.id] || {};
+    return {id: a.id, name: a.name, engine: ENGINE_FR[a.engine] || a.engine, famille: a.famille, threshold: a.threshold, prep: a.prep, no_stairs: a.no_stairs ? "oui" : "",
+      state: STATE_FR[o.state] || o.state, dep: o.dep, arr: o.arr, refuge: o.refuge || "", wet: o.wet, think: think[a.id] || 0, sent: sent[a.id] || 0, recv: recv[a.id] || 0, _st: o.state}; });
+}
+const AG_COLS = [["id", "id"], ["name", "nom"], ["engine", "moteur"], ["famille", "foyer"], ["threshold", "seuil", 1], ["prep", "prép. (min)", 1], ["no_stairs", "sans escaliers"],
+  ["state", "état final"], ["dep", "départ", 1], ["arr", "arrivée", 1], ["refuge", "refuge"], ["wet", "min dans l'eau", 1], ["think", "décisions", 1], ["sent", "messages envoyés", 1], ["recv", "messages reçus", 1]];
+function renderAgentTable() {
+  const tb = $("agTable"), q = $("agFilter").value.toLowerCase().trim();
+  let rows = agentRows().filter(r => !q || Object.values(r).some(v => String(v ?? "").toLowerCase().includes(q)));
+  const {k, dir} = agSort; rows.sort((a, b) => { const x = a[k] ?? -Infinity, y = b[k] ?? -Infinity; return (typeof x === "number" && typeof y === "number" ? x - y : String(x).localeCompare(String(y), "fr", {numeric: true})) * dir; });
+  $("agCount").textContent = `${rows.length} / ${cur.start.agents.length}`;
+  tb.textContent = "";
+  tb.append(el("thead", {}, el("tr", {}, AG_COLS.map(([key, lab, num]) => el("th", {class: num ? "num" : "", onclick: () => { agSort = {k: key, dir: agSort.k === key ? -agSort.dir : 1}; renderAgentTable(); }}, lab + (agSort.k === key ? (agSort.dir > 0 ? " ▲" : " ▼") : ""))))));
+  const body = el("tbody");
+  rows.forEach(r => body.append(el("tr", {class: "click" + (r.id === selAgent ? " sel" : ""), onclick: () => openAgent(r.id)},
+    AG_COLS.map(([key, , num]) => el("td", {class: num ? "num" : ""}, key === "state" ? [el("span", {class: "dot", style: `background:var(--s-${r._st})`}), r.state] : (key === "dep" || key === "arr") ? hm(r[key]) : key === "wet" ? f1(r[key]) : (r[key] ?? ""))))));
+  tb.append(body);
+}
+$("agFilter").oninput = () => renderAgentTable();
+
+let agKindsOn = new Set(Object.keys(KINDS));
+function openAgent(id, scroll = true) {
+  selAgent = id; const a = cur.byId[id], i = cur.idx[id], o = cur.light.agents[id] || {};
+  $("agDetail").classList.remove("hidden"); renderAgentTable();
+  $("agTitle").textContent = `Suivi de ${a.name} (${a.id}) · ${ENGINE_FR[a.engine] || a.engine}`;
+  const pr = $("agProfile"); pr.textContent = "";
+  pr.append(el("p", {style: "margin:0 0 6px"}, a.situation || ""));
+  const chips = [`foyer ${a.famille}`, `famille : ${(a.family || []).map(x => nameOf(cur, x)).join(", ") || "seul(e)"}`, `contacts : ${(a.contacts || []).map(x => nameOf(cur, x)).join(", ") || "aucun"}`,
+    `canaux : ${(a.canaux || []).join(", ")}`, `seuil de risque ${a.threshold}`, `préparation ${a.prep} min`, `confirmations ${a.needs_conf}`, `mobilité ${a.mob}`,
+    `confiance mairie ${a.trust_off}/5`, `confiance voisins ${a.trust_nb}/5`, `relaie ${Math.round(a.relay * 100)} %`,
+    a.no_stairs ? "ne peut pas prendre d'escaliers" : null, a.verifier ? "vérifie auprès de la mairie" : null, a.knows_detour ? "connaît le détour" : null,
+    (a.dependants || []).length ? `à charge : ${a.dependants.join(", ")}` : null, a.model ? `modèle ${a.model}` : null];
+  chips.filter(Boolean).forEach(c => pr.append(el("span", {class: "chip"}, c)));
+  const oc = $("agOutcome"); oc.textContent = "";
+  [["État final", STATE_FR[o.state] || o.state], ["Départ", o.dep == null ? "jamais" : `${hm(o.dep)} (+${f1(o.dep - 540)} min)`], ["Arrivée", o.arr == null ? "—" : `${hm(o.arr)} au refuge ${o.refuge}`],
+   ["Chemin", o.via ? String(o.via).replace(/_/g, " ") : "—"], ["Minutes dans l'eau", f1(o.wet)], ["Victime", cur.light.victims.has(id) ? "oui" : "non"]]
+    .forEach(([k, v]) => oc.append(el("dt", {}, k), el("dd", {}, v)));
+  // états, risque, eau
+  const tk = cur.ticks, segs = [];
+  tk.forEach((t, k) => { const st = STATES[t.s[i]], last = segs[segs.length - 1]; if (last && last.st === st) last.b = t.t; else { if (last) last.b = t.t; segs.push({st, a: t.t, b: t.t}); } });
+  const x0 = 540, x1 = tk.length ? tk[tk.length - 1].t : 600;
+  stateStrip($("agStates"), segs, x0, x1);
+  const bel = cur.events.filter(e => e.type === "agent.belief" && e.agent === id);
+  lineChart($("agRisk"), [x0, ...bel.map(e => e.t_sim)], [0, ...bel.map(e => e.data.risk)], {color: "var(--risk)", label: "risque perçu", step: true, yMax: 100, fmt: v => Math.round(v), x0, x1, H: 150});
+  const stepK = Math.max(1, Math.ceil(tk.length / 400)), pk = tk.filter((_, k) => k % stepK === 0);
+  lineChart($("agDepth"), pk.map(t => t.t), pk.map(t => t.d[i] * 100), {label: "cm d'eau", fmt: v => Math.round(v), x0, x1, H: 150});
+  drawAgentMap(i);
+  // filtres du journal
+  const kb = $("agKinds"); kb.textContent = "";
+  Object.entries(KINDS).forEach(([k, lab]) => {
+    const b = el("label", {class: "f"}, el("input", {type: "checkbox", ...(agKindsOn.has(k) ? {checked: ""} : {})}), el("span", {class: "dot", style: `background:var(${KIND_COL[k]})`}), lab);
+    b.querySelector("input").onchange = e => { e.target.checked ? agKindsOn.add(k) : agKindsOn.delete(k); renderJournal(id); }; kb.append(b);
+  });
+  renderJournal(id);
+  if (scroll) $("agDetail").scrollIntoView({behavior: "smooth", block: "start"});
+}
+function agentJournal(id) { return journalAll().filter(j => j.who.includes(id) && (j.k !== "envoye" || j.who[0] === id)); }
+function renderJournal(id) {
+  const box = $("agJournal"); box.textContent = "";
+  const J = agentJournal(id).filter(j => agKindsOn.has(j.k));
+  if (!J.length) box.append(el("p", {class: "muted"}, "Rien à afficher avec ces filtres."));
+  J.forEach(j => box.append(jLine(j.t, j.k, j.txt)));
+}
+$("agCsv").onclick = () => {
+  if (!selAgent) return;
+  const rows = [["heure", "categorie", "detail"], ...agentJournal(selAgent).map(j => [hm(j.t), KINDS[j.k], j.raw || ""])];
+  const csv = rows.map(r => r.map(v => `"${String(v).replace(/"/g, '""')}"`).join(";")).join("\r\n");
+  const a = el("a", {href: URL.createObjectURL(new Blob(["﻿" + csv], {type: "text/csv;charset=utf-8"})), download: `suivi_${cur.id}_${selAgent}.csv`}); a.click();
+};
+function drawAgentMap(i) {
+  const cv = $("agMap"), {c, w, h} = prep(cv), G = mapGeo || geo(cur.start), M = mapper(G, w, h), tk = cur.ticks;
+  drawBase(c, M, G, tk.length ? tk[tk.length - 1].t : 600);
+  if (!tk.length) return;
+  c.strokeStyle = css("--text"); c.lineWidth = 2; c.beginPath();
+  tk.forEach((t, k) => { const [px, pz] = M.P(t.x[i], t.z[i]); k ? c.lineTo(px, pz) : c.moveTo(px, pz); }); c.stroke();
+  const [sx, sz] = M.P(tk[0].x[i], tk[0].z[i]), last = tk[tk.length - 1], [ex, ez] = M.P(last.x[i], last.z[i]);
+  c.fillStyle = css("--s-home"); c.beginPath(); c.arc(sx, sz, 6, 0, 7); c.fill();
+  c.fillStyle = css("--s-" + STATES[last.s[i]]); c.strokeStyle = css("--text"); c.beginPath(); c.arc(ex, ez, 7, 0, 7); c.fill(); c.stroke();
+}
+
+// ---------- paramètres et comportements (plusieurs runs) ----------
+const PARAMS = {
+  group: ["dossier", r => r.group || "—"], scenario: ["scénario", r => r.start.scenario], crue: ["crue", r => (r.start.crue || {}).type],
+  update_at: ["alerte d'évacuation", r => clockOf(r.start.update_at)], rumor_at: ["rumeur", r => clockOf(r.start.rumor_at)], panne_reseau: ["panne du réseau", r => r.start.panne_reseau],
+  n_agents: ["habitants", r => r.start.n_agents], llm: ["habitants LLM", r => (r.start.llm_agents || []).length ? `${r.start.llm_agents.length} LLM` : "règles seules"], mode: ["mode", r => r.start.mode], seed: ["graine", r => r.start.seed]};
+const METRICS = {safe_pct: ["au refuge (%)", v => `${Math.round(v)} %`], sheltered_pct: ["à l'étage chez soi (%)", v => `${Math.round(v)} %`], victims: ["victimes", f1],
+  sinistree: ["maisons sinistrées", f1], depart_avg: ["départ moyen (min après 09:00)", f1], common_context_avg: ["contexte commun moyen (%)", v => `${Math.round(v)} %`],
+  exact_bridge: ["lecture juste du pont (%)", v => `${Math.round(v)} %`], wet_avg: ["min dans l'eau (moy.)", f1], calls: ["appels LLM", v => Math.round(v)]};
+function renderParams() {
+  const gb = $("groupBy"), mt = $("metric");
+  if (!gb.options.length) {
+    Object.entries(PARAMS).forEach(([k, [lab]]) => gb.append(el("option", {value: k}, lab)));
+    Object.entries(METRICS).forEach(([k, [lab]]) => mt.append(el("option", {value: k}, lab)));
+    gb.value = runs.some(r => r.group) ? "group" : "scenario"; gb.onchange = mt.onchange = renderGroups;
+  }
+  const tb = $("runTable"); tb.textContent = "";
+  const pk = ["group", "scenario", "crue", "update_at", "rumor_at", "panne_reseau", "n_agents", "llm", "seed"], mk = ["safe_pct", "sheltered_pct", "victims", "sinistree", "depart_avg", "common_context_avg"];
+  tb.append(el("thead", {}, el("tr", {}, el("th", {}, "run"), pk.map(k => el("th", {}, PARAMS[k][0])), mk.map(k => el("th", {class: "num"}, METRICS[k][0])))));
+  const body = el("tbody");
+  runs.forEach(r => body.append(el("tr", {class: "click" + (cur && cur.light === r ? " sel" : ""), onclick: async () => { await openRun(r); renderParams(); showTab("overview"); }},
+    el("td", {}, r.id + (r.complete ? "" : " (incomplet)")), pk.map(k => el("td", {}, PARAMS[k][1](r) ?? "—")), mk.map(k => el("td", {class: "num"}, r.m[k] == null ? "—" : METRICS[k][1](r.m[k]))))));
+  tb.append(body); renderGroups(); renderTraits();
+}
+function renderGroups() {
+  const g = $("groupBy").value, mk = $("metric").value, groups = new Map();
+  runs.forEach(r => { const v = String(PARAMS[g][1](r) ?? "—"); if (!groups.has(v)) groups.set(v, []); groups.get(v).push(r); });
+  const keys = [...groups.keys()].sort((a, b) => a.localeCompare(b, "fr", {numeric: true}));
+  const items = keys.map(k => { const v = groups.get(k).map(r => r.m[mk]).filter(x => x != null); return {label: k, v: mean(v), sd: sd(v), n: groups.get(k).length}; });
+  barChart($("chartGroup"), items, METRICS[mk][1], /pct|common_context|exact/.test(mk));
+  const tb = $("groupTable"); tb.textContent = "";
+  tb.append(el("thead", {}, el("tr", {}, el("th", {}, PARAMS[g][0]), el("th", {class: "num"}, "runs"), Object.values(METRICS).map(([lab]) => el("th", {class: "num"}, lab)))));
+  const body = el("tbody");
+  keys.forEach(k => { const rs = groups.get(k);
+    body.append(el("tr", {}, el("td", {}, k), el("td", {class: "num"}, rs.length), Object.entries(METRICS).map(([mk2, [, fmt]]) => {
+      const v = rs.map(r => r.m[mk2]).filter(x => x != null), m = mean(v), s = sd(v);
+      return el("td", {class: "num"}, m == null ? "—" : fmt(m) + (s != null ? ` ± ${fmt(s)}` : "")); }))); });
+  tb.append(body);
+}
+const TRAITS = {
+  threshold: ["seuil de risque", a => a.threshold < 45 ? "< 45" : a.threshold < 55 ? "45-54" : a.threshold < 65 ? "55-64" : "≥ 65"],
+  prep: ["temps de préparation (min)", a => a.prep], needs_conf: ["confirmations demandées", a => a.needs_conf], no_stairs: ["ne peut pas prendre d'escaliers", a => a.no_stairs ? "oui" : "non"],
+  dependants: ["personnes à charge", a => (a.dependants || []).length ? "oui" : "non"], radio: ["écoute la radio", a => (a.canaux || []).includes("radio") ? "oui" : "non"],
+  telephone: ["a le téléphone", a => (a.canaux || []).includes("telephone") ? "oui" : "non"], verifier: ["vérifie auprès de la mairie", a => a.verifier ? "oui" : "non"],
+  mob: ["mobilité", a => a.mob < .8 ? "lente (< 0,8)" : "normale"], engine: ["moteur de décision", a => ENGINE_FR[a.engine] || a.engine],
+  trust_off: ["confiance dans la mairie (1-5)", a => a.trust_off], foyer: ["taille du foyer", null], fiche: ["habitant de la fiche ou généré", a => +a.id.slice(1) <= 12 ? "fiche (A01-A12)" : "généré"]};
+function renderTraits() {
+  const ts = $("trait");
+  if (!ts.options.length) { Object.entries(TRAITS).forEach(([k, [lab]]) => ts.append(el("option", {value: k}, lab))); ts.value = "prep"; ts.onchange = $("traitRuns").onchange = renderTraits; }
+  const which = $("traitRuns").value === "sel" && cur ? [cur.light] : runs, key = ts.value, groups = new Map();
+  for (const r of which) {
+    const fam = {}; r.start.agents.forEach(a => fam[a.famille] = (fam[a.famille] || 0) + 1);
+    for (const a of r.start.agents) {
+      const o = r.agents[a.id] || {}, v = key === "foyer" ? (fam[a.famille] <= 1 ? "1" : fam[a.famille] <= 2 ? "2" : fam[a.famille] <= 4 ? "3-4" : "5 et +") : TRAITS[key][1](a);
+      if (!groups.has(v)) groups.set(v, []); groups.get(v).push(o);
+    }
+  }
+  const tb = $("traitTable"); tb.textContent = "";
+  tb.append(el("thead", {}, el("tr", {}, ["valeur", "habitants-runs", "partis", "départ moyen (min après 09:00)", "au refuge", "à l'étage chez soi", "victimes", "min dans l'eau (moy.)"].map((h, k) => el("th", {class: k ? "num" : ""}, h)))));
+  const body = el("tbody");
+  [...groups.keys()].sort((a, b) => String(a).localeCompare(String(b), "fr", {numeric: true})).forEach(k => {
+    const g = groups.get(k), dep = g.filter(o => o.dep != null).map(o => o.dep - 540), wet = g.filter(o => o.wet != null).map(o => o.wet);
+    body.append(el("tr", {}, el("td", {}, k), ...[g.length, pct(dep.length, g.length), f1(mean(dep)), pct(g.filter(o => o.state === "arrived").length, g.length),
+      pct(g.filter(o => o.state === "sheltered").length, g.length), g.filter(o => o.state === "victim").length, f1(mean(wet))].map(v => el("td", {class: "num"}, v))));
+  });
+  tb.append(body);
+}
+window.addEventListener("resize", () => { if (!cur) return; clearTimeout(window._rz); window._rz = setTimeout(renderTab, 200); });
+showTab("overview");
+(async () => {                                                    // liens directs (page servie en http) : ?run=chemin.jsonl&run=…&tab=agents&agent=A06&t=560
+  const q = new URLSearchParams(location.search), paths = q.getAll("run");
+  if (!paths.length) return;
+  const files = [];
+  for (const p of paths) { try { const b = await (await fetch(p)).blob(); files.push(Object.assign(new File([b], p.split("/").pop()), {_path: p})); } catch (ex) { console.warn(p, ex); } }
+  await addFiles(files);
+  if (q.get("tab")) showTab(q.get("tab"));
+  if (q.get("t") && cur) { const t = +q.get("t"); frameI = Math.max(0, cur.ticks.findIndex(k => k.t >= t)); $("scrub").value = frameI; }
+  if (q.get("agent") && cur && cur.byId[q.get("agent")]) { selAgent = q.get("agent"); if (tab === "agents") openAgent(selAgent, false); else drawMap(); }
+})();
+</script>
+</body>
+</html>

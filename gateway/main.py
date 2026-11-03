@@ -16,8 +16,10 @@ DATA = {                                         # champs obligatoires de data, 
     "rumor": ("text", "claim", "targets"), "bridge.closed": (), "agent.think": ("action", "why", "decider"),
     "agent.belief": ("bridge", "refuge", "danger", "risk"), "agent.say": ("to", "text", "kind", "origin", "msg_id"),
     "agent.prepare": ("ready_at",), "agent.depart": ("refuge", "via", "path"), "agent.reroute": ("reason", "path"),
-    "agent.arrive": ("refuge",), "agent.blocked": ("reason",), "agent.shelter": ("reason",), "agent.observe": ("what",), "agent.verify": ("until",),
+    "agent.arrive": ("refuge",), "agent.blocked": ("reason",), "agent.shelter": ("reason",), "agent.distress": ("reason",), "agent.distress_end": (), "agent.victim": ("reason",),
+    "house.damage": ("house", "agents", "level"), "agent.observe": ("what",), "agent.verify": ("until",),
     "agent.verify_result": ("result",), "refuge.full": ("refuge",), "llm.incident": ("kind",), "metrics": (), "tick": ("step",),
+    "message.lost": ("to", "reason"), "network.down": ("at",), "run.speed": ("scale",),
     "run.end": ("indicators",), "run.paused": (), "run.resumed": (), "command.ack": ("cmd",),
 }
 clients, buf, prod = set(), [], None

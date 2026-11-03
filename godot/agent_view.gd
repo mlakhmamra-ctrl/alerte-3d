@@ -2,9 +2,9 @@ extends Node3D
 # Un habitant à l'écran : personnage en voxels de 1,70 m (style de la vidéo AGORA), orbe de pensée (LLM), éclaboussures dans l'eau.
 
 const STATE_COL := {"home": Color("8fa3b8"), "preparing": Color("f2b134"), "walking": Color("f4f1e8"),
-	"blocked": Color("e5484d"), "arrived": Color("46b97a"), "sheltered": Color("9b8cff")}
+	"blocked": Color("e5484d"), "arrived": Color("46b97a"), "sheltered": Color("9b8cff"), "victim": Color("c8323a")}
 const STATE_FR := {"home": "chez soi", "preparing": "prépare son départ", "walking": "en route",
-	"blocked": "bloqué(e)", "arrived": "à l'abri", "sheltered": "à l'abri chez soi (étage)"}
+	"blocked": "bloqué(e)", "arrived": "à l'abri", "sheltered": "à l'abri chez soi (étage)", "victim": "victime"}
 
 var aid := ""
 var info := {}
@@ -12,6 +12,7 @@ var target := Vector3.ZERO
 var vel := Vector3.ZERO
 var state := "home"
 var thinking := false
+var distress := false      # en danger (dehors dans l'eau, ou bloqué au rez-de-chaussée inondé)
 var depth := 0.0
 var phase := 0.0
 var flash := 0.0
@@ -147,7 +148,7 @@ func set_state(s: String) -> void:
 	if s == state:
 		return
 	state = s
-	visible = s != "sheltered"                      # monté à l'étage : il n'est plus dans la rue
+	rotation.z = PI * 0.5 if s == "victim" else 0.0   # victime : allongée
 	var c: Color = STATE_COL.get(s, Color.WHITE)
 	vest_mat.albedo_color = c
 	vest_mat.emission = c
@@ -188,7 +189,8 @@ func tick(delta: float, ground_y: float, sel: bool) -> void:
 		orb.scale = Vector3.ONE * ((1.0 + 0.35 * p) if thinking else 0.8)
 		orb.position.y = 2.15 + (0.06 * sin(Time.get_ticks_msec() * 0.004))
 		orb.rotation.y += 0.02
-	if state == "blocked":
+	visible = state != "sheltered" or distress        # monté à l'étage : plus dans la rue, sauf s'il est en danger
+	if state == "blocked" or distress:
 		flash += delta * 6.0
 		vest_mat.emission_energy_multiplier = 0.5 + 1.5 * abs(sin(flash))
 	label.modulate = Color("ffe08a") if sel else Color(1, 1, 1, 0.92)

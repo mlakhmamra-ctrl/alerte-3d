@@ -5,6 +5,8 @@ data/runs/*.jsonl
 !data/runs/exemple_regles_pont_ferme.jsonl
 data/batch_*.json
 data/rag_eval.md
+# réglages de l'interface de gestion des villageois (propres à chaque machine)
+data/villageois.json
 
 # Secrets et réglages locaux : jamais sur GitHub.
 # Les réglages publics sont dans .env.exemple ; .env (copie locale, où l'on peut mettre LLM_API_KEY) le remplace.
@@ -21,3 +23,8 @@ credentials*.json
 secrets/
 # Godot : les préréglages d'export peuvent contenir les mots de passe de signature
 godot/export_presets.cfg
+
+# Données d'étude des paramètres (lourdes, régénérables avec tools/etude_parametres.py)
+data/etude/
+data/etude_test/
+data/etude_llm_log.txt

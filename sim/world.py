@@ -41,17 +41,33 @@ def ground(x, z):
     g += 0.6 * math.exp(-((x / S + 40) ** 2 + (z / S + 28) ** 2) / 300)            # colline ouest (Passage des Hauteurs)
     return round(g, 3)
 
+# CRUE : vitesse de montée de l'eau (paramètres de maquette). bank = débordement sur les Quais, peak = heure du pic,
+# k = forme de la montée après le débordement (1 = régulière, > 1 = très rapide au début puis ralentie), mult = hauteur du pic.
+CRUES = {
+    "lente":  {"bank": "09:10", "peak": "09:40", "k": 1.2, "mult": 1.0, "nom": "crue lente : l'eau monte régulièrement, on a le temps de voir venir"},
+    "rapide": {"bank": "09:06", "peak": "09:26", "k": 2.0, "mult": 1.0, "nom": "crue rapide : débordement brusque, l'eau monte de plusieurs cm par minute"},
+    "eclair": {"bank": "09:03", "peak": "09:11", "k": 3.0, "mult": 1.25, "nom": "crue éclair : l'eau monte en quelques minutes, puis reste haute"},
+}
+
 class Flood:
-    """Niveau d'eau Y(t). 09:00-09:10 : la rivière remplit son lit (fond + 0,15 m -> berges à 0 m).
-    À partir de 09:10 elle déborde sur les Quais (étape 2 de la fiche) et monte jusqu'au pic du scénario à 10:00."""
-    def __init__(s, peak, t0=t_of("09:00"), t_bank=t_of("09:10"), t_peak=t_of("10:00")):
-        s.peak, s.t0, s.t_bank, s.t_peak = peak, t0, t_bank, t_peak
+    """Niveau d'eau Y(t). Avant le débordement, la rivière remplit son lit (fond + 0,15 m -> berges à 0 m).
+    Ensuite elle déborde sur les Quais (étape 2 de la fiche) et monte jusqu'au pic du scénario, plus ou moins vite selon CRUE."""
+    def __init__(s, peak, kind="rapide", t0=t_of("09:00")):
+        c = CRUES.get(kind, CRUES["rapide"]); s.kind = kind if kind in CRUES else "rapide"
+        s.peak, s.t0, s.t_bank, s.t_peak, s.k = round(peak * c["mult"], 3), t0, t_of(c["bank"]), t_of(c["peak"]), c["k"]
         s.base = BED_Y + 0.15
     def level(s, t):
         if t <= s.t0: return s.base
         if t <= s.t_bank: return round(s.base * (1 - (t - s.t0) / (s.t_bank - s.t0)), 3)
         u = min(1.0, (t - s.t_bank) / (s.t_peak - s.t_bank))
-        return round(s.peak * (1 - (1 - u) ** 1.6), 3)            # débordement rapide puis ralenti
+        return round(s.peak * (1 - (1 - u) ** s.k), 3)
+    def rate(s, t):
+        """Vitesse de montée (cm par minute simulée) à l'instant t."""
+        return round(max(0.0, s.level(t + .5) - s.level(t - .5)) * 100, 1)
+    def info(s):
+        steps = [s.t_bank + 1 + i for i in range(int(s.t_peak - s.t_bank))]      # après le débordement : ce que voient les habitants
+        return {"type": s.kind, "nom": CRUES[s.kind]["nom"], "t_bank": s.t_bank, "t_peak": s.t_peak, "peak": s.peak,
+                "rate_max_cm_min": max(s.rate(t) for t in steps)}
     def depth(s, x, z, t):
         if on_crossing(x, z): return 0.0                          # tablier du pont / passerelle : au-dessus de l'eau
         return max(0.0, s.level(t) - ground(x, z))

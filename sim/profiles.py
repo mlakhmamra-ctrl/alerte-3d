@@ -4,6 +4,8 @@ Ce sont des choix de maquette, documentés ici pour pouvoir être discutés et v
 import math, random
 
 # engine : "rule", "big" (LLM grand) ou "small" (LLM compact). trust_off / trust_nb : 1..5. mob : coefficient de mobilité (1,00 = 1,2 m/s).
+# famille (ajouté à population()) : foyer de l'habitant ; dependants : personnes à charge qui ne sont pas des agents ;
+# canaux : moyens de communication en plus du face-à-face (toujours possible à portée de voix) — voir CANAUX.
 FICHE = [
     dict(id="A01", name="Lina", situation="Accompagne un enfant ; retarde son départ pour préparer un sac.",
          pos=(-44, 36), pos_fiche=(-42, 27), trust_off=4, trust_nb=3, mob=.95, contacts=["A02", "A05"], engine="rule",
@@ -44,6 +46,39 @@ FICHE = [
          threshold=55, prep=3, needs_conf=2, local_obs=False, no_stairs=False, knows_detour=False, relay=.4, verifier=False),
 ]
 
+# Canaux de communication (en plus du face-à-face, à portée de voix ou dans le même foyer) :
+#   telephone : appels et SMS, y compris l'alerte de la mairie sur mobile ; dépend du réseau mobile
+#   groupe    : groupe de messagerie du quartier (smartphone) ; lu moins vite, moins cru ; dépend du réseau mobile
+#   radio     : radio locale, reçoit seulement les bulletins de la mairie ; ne dépend pas du réseau mobile
+CANAUX = ("telephone", "groupe", "radio")
+CANAUX_FICHE = {"A01": ["telephone", "groupe"], "A02": ["telephone", "groupe"], "A03": ["telephone", "radio"],
+                "A04": ["telephone", "radio"], "A05": ["telephone", "groupe"], "A06": ["telephone", "groupe"],
+                "A07": ["telephone", "radio"], "A08": ["telephone", "radio"], "A09": ["telephone", "groupe"],
+                "A10": ["telephone", "groupe"], "A11": ["telephone", "groupe"], "A12": ["telephone", "radio"]}
+DEPENDANTS_FICHE = {"A01": ["enfant"], "A07": ["parent âgé"]}     # la fiche : Lina accompagne un enfant, Maya aide un parent âgé
+# Réglages qu'on peut changer depuis l'interface de gestion (admin/index.html), habitant par habitant
+EDITABLE = {"name": str, "situation": str, "engine": str, "trust_off": int, "trust_nb": int, "mob": float, "threshold": int, "prep": int,
+            "needs_conf": int, "relay": float, "local_obs": bool, "no_stairs": bool, "knows_detour": bool, "verifier": bool,
+            "famille": str, "dependants": list, "canaux": list, "contacts": list}
+
+def apply_overrides(profiles, overrides):
+    """Applique les réglages de l'interface de gestion ({id: {champ: valeur}}). Ignore les champs inconnus ou mal typés."""
+    ids = {p["id"] for p in profiles}
+    for p in profiles:
+        for k, v in (overrides.get(p["id"]) or {}).items():
+            typ = EDITABLE.get(k)
+            if typ is None: continue
+            try: v = typ(v) if typ is not list else [str(x) for x in v]
+            except (TypeError, ValueError): continue
+            if k == "engine" and v not in ("rule", "big", "small"): continue
+            if k in ("trust_off", "trust_nb"): v = max(1, min(5, v))
+            if k == "mob": v = max(.1, min(2.0, v))
+            if k == "relay": v = max(0.0, min(1.0, v))
+            if k == "canaux": v = [c for c in v if c in CANAUX]
+            if k == "contacts": v = [c for c in v if c in ids and c != p["id"]]
+            p[k] = v
+    return profiles
+
 FREE_SPOTS = [(-28, 36), (-8, 36), (8, 36), (24, 36), (44, 36), (-10, 25), (26, 25), (44, 27), (-25, 18), (24, 13),
               (44, 13), (-15, 13), (30, 31), (-30, 31), (12, 31), (-6, 28), (48, 31), (-24, 25), (38, 19), (6, 28)]
 # MONDE=etendu : portes des maisons des quartiers Ouest et Est (rive sud), face à la rue des Quais (z = 14), à la rue du Sud (z = 34)
@@ -70,6 +105,7 @@ def population(n, llm_ids, rng: random.Random, big_ids=("A04", "A05"), small_ids
         q = dict(p); q["memory"] = list(p.get("memory", []))
         if q["id"] not in llm_ids: q["engine"] = "rule"
         elif q["engine"] == "rule": q["engine"] = "small"           # un id ajouté à LLM_AGENTS pense avec le petit modèle
+        q.update(famille=f"F{q['id'][1:]}", dependants=list(DEPENDANTS_FICHE.get(q["id"], [])), canaux=list(CANAUX_FICHE[q["id"]]))
         out.append(q)
     spots = FREE_SPOTS + (NEW_SPOTS if EXTENDED else [])
     home = {}
@@ -78,7 +114,8 @@ def population(n, llm_ids, rng: random.Random, big_ids=("A04", "A05"), small_ids
         x, z = spots[home[aid]]; x += rng.uniform(-1.5, 1.5)
         q = dict(base); q.update(id=aid, name=f"Voisin {k + 1}", pos=(round(x, 1), z), engine="big" if aid in llm_ids and aid in big_ids else "small" if aid in llm_ids else "rule",
                                  situation=f"{base['situation']} (profil généré à partir de {base['id']})", memory=[], zone=zone_refuge(x),
-                                 threshold=base["threshold"] + rng.randint(-8, 8), mob=round(base["mob"] * rng.uniform(.9, 1.1), 2))
+                                 threshold=base["threshold"] + rng.randint(-8, 8), mob=round(base["mob"] * rng.uniform(.9, 1.1), 2),
+                                 famille=f"F{13 + home[aid]:02d}", dependants=list(DEPENDANTS_FICHE.get(base["id"], [])), canaux=list(CANAUX_FICHE[base["id"]]))
         out.append(q)
     # Contacts des habitants générés : les autres membres de leur foyer (3 au plus) et le voisin le plus proche d'une autre maison.
     # Le réseau de la fiche est orienté (ex. A12 écrit à A04, mais A04 n'écrit pas à A12) : on le garde, et chaque habitant de la fiche
@@ -98,4 +135,42 @@ def population(n, llm_ids, rng: random.Random, big_ids=("A04", "A05"), small_ids
             if c not in home: added[c] = added.get(c, 0) + 1
     for o in out: o["pos"] = sc(o["pos"])                       # WORLD_SCALE : même plan, écarté (1 = fiche)
     for o in out: o["contacts"] = [c for c in o["contacts"] if c in by_id]
+    return out
+
+MAX_AGENTS = 400                                                # garde-fou : au-delà, la simulation et Godot ralentissent trop
+QUARTIERS = {"tous": lambda x: True, "centre": lambda x: abs(x) <= 60, "ouest": lambda x: x < -60, "est": lambda x: x > 60}
+
+def add_batch(out, lot, rng: random.Random, k_lot):
+    """Ajoute un lot d'habitants d'un coup (interface de gestion), au lieu de les créer un par un.
+    lot : nombre, modele (A01..A12, dont on copie le comportement ; « mix » = tous les profils à tour de rôle), moteur (rule, big, small
+    ou mix avec part_llm en %), taille_foyer, canaux, dependants, quartier, nom. Ids et familles continuent la numérotation."""
+    try: n = max(0, min(int(lot.get("nombre", 0)), MAX_AGENTS - len(out)))
+    except (TypeError, ValueError): return out
+    if n == 0: return out
+    models = [p for p in FICHE if p["id"] == lot.get("modele")] or FICHE
+    size = max(1, min(6, int(lot.get("taille_foyer", 2) or 1)))
+    moteur = lot.get("moteur", "rule"); part = max(0, min(100, float(lot.get("part_llm", 0) or 0))) / 100
+    canaux = [c for c in lot.get("canaux", []) if c in CANAUX] if isinstance(lot.get("canaux"), list) else None
+    deps = [str(d) for d in lot.get("dependants", [])] if isinstance(lot.get("dependants"), list) else None
+    inside = QUARTIERS.get(lot.get("quartier", "tous"), QUARTIERS["tous"]) if EXTENDED else QUARTIERS["tous"]
+    spots = [s for s in FREE_SPOTS + (NEW_SPOTS if EXTENDED else []) if inside(s[0])] or FREE_SPOTS
+    fam_no = 1 + max(int(o["famille"][1:]) for o in out if o.get("famille", "F")[1:].isdigit())
+    nom = str(lot.get("nom") or f"Lot {k_lot}")[:30]
+    new = []
+    for i in range(n):
+        base = models[i % len(models)]; aid = f"A{len(out) + 1:02d}"
+        foyer = i // size; x, z = spots[(foyer + k_lot * 7) % len(spots)]; x += rng.uniform(-2.5, 2.5)
+        eng = moteur if moteur in ("rule", "big", "small") else ("big" if rng.random() < .5 else "small") if rng.random() < part else "rule"
+        q = dict(base); q.update(id=aid, name=f"{nom} · {i + 1}", pos=sc((round(x, 1), z)), engine=eng, memory=[], zone=zone_refuge(x),
+                                 situation=f"{base['situation']} ({nom}, profil de {base['id']})", famille=f"F{fam_no + foyer:02d}",
+                                 threshold=base["threshold"] + rng.randint(-8, 8), mob=round(base["mob"] * rng.uniform(.9, 1.1), 2),
+                                 dependants=list(deps if deps is not None else DEPENDANTS_FICHE.get(base["id"], [])),
+                                 canaux=list(canaux if canaux is not None else CANAUX_FICHE[base["id"]]))
+        out.append(q); new.append(q)
+    for o in new:                       # contacts : son foyer + le voisin le plus proche d'un autre foyer, qui lui écrit en retour
+        fam = [g["id"] for g in new if g["id"] != o["id"] and g["famille"] == o["famille"]]
+        others = [x for x in out if x["famille"] != o["famille"]]
+        near = min(others, key=lambda x: math.dist(x["pos"], o["pos"])) if others else None
+        o["contacts"] = fam + ([near["id"]] if near else [])
+        if near and o["id"] not in near["contacts"]: near["contacts"] = near["contacts"] + [o["id"]]
     return out

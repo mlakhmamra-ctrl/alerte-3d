@@ -1,0 +1,12 @@
+# Variante « API seulement » : les agents LLM pensent avec des API distantes (LLM_BACKENDS sans « local », voir .env.exemple).
+# Ollama n'est ni lancé ni téléchargé (aucun modèle de 6 Go en local) ; le RAG passe en recherche lexicale.
+#   docker compose -f docker-compose.yml -f docker-compose.api.yml up --build     (ou lancer_api.bat)
+services:
+  ollama:
+    profiles: [ "ollama" ]
+  ollama-pull:
+    profiles: [ "ollama" ]
+  sim:
+    depends_on: !override
+      kafka-init: { condition: service_completed_successfully }
+      gateway: { condition: service_started }
