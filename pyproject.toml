@@ -1,0 +1,24 @@
+# Configuration des outils de qualité (le code tourne dans Docker ; ce fichier ne sert qu'aux tests et à l'analyse).
+#   python -m pytest                 -> tests unitaires + non-régression (tests/)
+#   ruff check sim gateway tools spark tests
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 160
+extend-exclude = ["godot", "data"]
+
+[tool.ruff.lint]
+# F : erreurs (imports inutiles, noms indéfinis) ; B : pièges courants ; E9 : erreurs de syntaxe ; ASYNC : asyncio ;
+# RUF006 : tâche asyncio sans référence (peut être détruite en cours de route) ; C90 : complexité
+select = ["F", "B", "E9", "PLE", "ASYNC", "RUF006", "C90"]
+ignore = [
+    "B905",      # zip(strict=) : les zip du projet portent sur des listes de même longueur par construction
+    "ASYNC230",  # open() dans une fonction async : fichiers locaux minuscules, au démarrage ou à la fin du run
+    "ASYNC240",
+]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 20

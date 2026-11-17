@@ -10,3 +10,4 @@ services:
     depends_on: !override
       kafka-init: { condition: service_completed_successfully }
       gateway: { condition: service_started }
+      postgres: { condition: service_healthy }

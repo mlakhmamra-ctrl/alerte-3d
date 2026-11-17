@@ -1,0 +1,8 @@
+# Outils de qualité (hors conteneurs) : pip install -r requirements-dev.txt
+-r sim/requirements.txt
+-r gateway/requirements.txt
+pytest==8.3.4
+ruff==0.17.5
+radon==6.0.1
+# jobs Spark (spark/) : la même version que l'image apache/spark du docker compose ; les tests Spark demandent aussi Java
+pyspark==3.5.3

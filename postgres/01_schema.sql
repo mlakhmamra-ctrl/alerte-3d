@@ -60,6 +60,7 @@ CREATE TABLE souvenir (
     tags      text[] NOT NULL DEFAULT '{}',          -- lieux, sujets, personnes concernés (comme Agent.remember)
     msg_id    text,                                   -- message d'où vient le souvenir, s'il a été transmis
     tsv       tsvector GENERATED ALWAYS AS (to_tsvector('french', texte)) STORED,
+    cle       text GENERATED ALWAYS AS (md5(regexp_replace(texte, '^[0-9]{2}:[0-9]{2} — ', ''))) STORED,   -- même contenu = même clé (cache des vecteurs)
     FOREIGN KEY (run_id, agent_id) REFERENCES agent ON DELETE CASCADE
 );
 CREATE INDEX souvenir_agent ON souvenir (run_id, agent_id, t_sim);
@@ -88,6 +89,7 @@ CREATE TABLE reception (
     destinataire  text,
     canal         text,                      -- face_a_face, telephone, groupe
     perdu         boolean NOT NULL DEFAULT false,
+    t_recu        numeric,                   -- heure où le message est lu (envoi + délai du canal) ; NULL = heure d'envoi
     PRIMARY KEY (run_id, msg_id, destinataire),
     FOREIGN KEY (run_id, msg_id) REFERENCES message ON DELETE CASCADE
 );
@@ -149,7 +151,8 @@ BEGIN
             sources       = CASE WHEN src = ANY (f.sources) THEN f.sources ELSE f.sources || src END,
             officiel      = f.officiel OR EXCLUDED.officiel;
     END LOOP;
-    IF NEW.auteur IS NOT NULL THEN
+    -- memoire.direct = on : la simulation écrit elle-même les souvenirs (journal de l'agent, à l'heure exacte) ; pas de doublon
+    IF NEW.auteur IS NOT NULL AND current_setting('memoire.direct', true) IS DISTINCT FROM 'on' THEN
         INSERT INTO souvenir (run_id, agent_id, t_sim, texte, tags, msg_id)
         VALUES (NEW.run_id, NEW.auteur, NEW.t_sim, hm(NEW.t_sim) || ' — j''ai partagé : « ' || coalesce(NEW.texte, '') || ' »',
                 ARRAY['message'] || CASE WHEN NEW.claims ? 'bridge' THEN ARRAY['pont'] ELSE '{}' END, NEW.msg_id);
@@ -164,11 +167,11 @@ CREATE TRIGGER message_publie AFTER INSERT ON message FOR EACH ROW EXECUTE FUNCT
 CREATE FUNCTION message_recu() RETURNS trigger LANGUAGE plpgsql SET search_path = memoire AS $$
 DECLARE m message;
 BEGIN
-    IF NEW.perdu THEN RETURN NEW; END IF;
+    IF NEW.perdu OR current_setting('memoire.direct', true) = 'on' THEN RETURN NEW; END IF;
     SELECT * INTO m FROM message WHERE run_id = NEW.run_id AND msg_id = NEW.msg_id;
     INSERT INTO souvenir (run_id, agent_id, t_sim, texte, tags, msg_id)
-    VALUES (NEW.run_id, NEW.destinataire, m.t_sim,
-            hm(m.t_sim) || ' — ' || coalesce(m.auteur, m.origine, 'quelqu''un') || ' me dit (' || coalesce(NEW.canal, m.genre) || ') : « ' || coalesce(m.texte, '') || ' »',
+    VALUES (NEW.run_id, NEW.destinataire, coalesce(NEW.t_recu, m.t_sim),
+            hm(coalesce(NEW.t_recu, m.t_sim)) || ' — ' || coalesce(m.auteur, m.origine, 'quelqu''un') || ' me dit (' || coalesce(NEW.canal, m.genre) || ') : « ' || coalesce(m.texte, '') || ' »',
             ARRAY['message', m.genre] || CASE WHEN m.claims ? 'bridge' THEN ARRAY['pont'] ELSE '{}' END
                                     || CASE WHEN m.auteur IS NOT NULL THEN ARRAY[m.auteur] ELSE '{}' END,
             m.msg_id);
@@ -294,13 +297,122 @@ BEGIN
                         hm(t0) || '–' || hm(p_jusqu_a) || ' — résumé : ' || r;
 END $$;
 
+-- RAG : ce que l'habitant retrouve avant de décider (appelé par la simulation, sim/memoire_pg.py) ---------------------
+
+-- Base de connaissances du quartier (sim/corpus.py), copiée ici par la simulation au démarrage.
+CREATE TABLE document (
+    doc_id  text PRIMARY KEY,
+    site    text,
+    topic   text,                 -- sert à évaluer la recherche, jamais à filtrer
+    annee   int,
+    source  text,
+    fiable  boolean,
+    texte   text NOT NULL,
+    tsv     tsvector GENERATED ALWAYS AS (to_tsvector('french', texte)) STORED
+);
+CREATE INDEX document_tsv ON document USING gin (tsv);
+
+-- Requête « en OU » : un document ou un souvenir qui partage quelques mots avec la question compte déjà.
+CREATE FUNCTION requete_ou(p_question text) RETURNS tsquery LANGUAGE sql IMMUTABLE AS $$
+    SELECT to_tsquery('french', nullif(replace(plainto_tsquery('french', p_question)::text, '&', '|'), ''))
+$$;
+
+-- 1. Les k documents du quartier les plus pertinents (recherche plein texte en français).
+CREATE FUNCTION rag_documents(p_question text, k int DEFAULT 2)
+RETURNS TABLE (doc_id text, score numeric) LANGUAGE sql STABLE SET search_path = memoire AS $$
+    SELECT d.doc_id, round(ts_rank(d.tsv, q.q)::numeric, 4)
+    FROM document d, (SELECT requete_ou(p_question) AS q) q
+    WHERE d.tsv @@ q.q
+    ORDER BY ts_rank(d.tsv, q.q) DESC, d.doc_id LIMIT k
+$$;
+
+-- 2. Les k souvenirs les plus utiles d'un habitant à l'instant t (même logique que RAG.recall dans sim/rag.py) :
+-- texte proche de la question + sujets et personnes en commun + fraîcheur, et l'importance pour départager.
+-- Seuls les souvenirs déjà vécus (t_sim <= t) comptent : jamais un message avant de l'avoir reçu.
+CREATE FUNCTION rag_souvenirs(p_run text, p_agent text, p_question text, p_sujets text[], p_personnes text[], t numeric, k int DEFAULT 3)
+RETURNS TABLE (texte text, score numeric) LANGUAGE sql STABLE SET search_path = memoire AS $$
+    SELECT x.texte, round(x.sc::numeric, 4) FROM (
+        SELECT s.texte, s.t_sim,
+               coalesce(ts_rank(s.tsv, q.q, 32), 0)
+               + cardinality(ARRAY(SELECT unnest(s.tags) INTERSECT SELECT unnest(p_sujets)))
+               + cardinality(ARRAY(SELECT unnest(s.tags) INTERSECT SELECT unnest(p_personnes)))
+               + s.t_sim / 1e6 + importance(s.tags, s.texte) / 1e3 AS sc
+        FROM souvenir s, (SELECT requete_ou(p_question) AS q) q
+        WHERE s.run_id = p_run AND s.agent_id = p_agent AND s.t_sim <= t) x
+    WHERE x.sc > 0.05
+    ORDER BY x.sc DESC, x.t_sim DESC LIMIT k
+$$;
+
+-- 3. Ce que dit le groupe du quartier (mémoire collective) : pour le pont et le danger, chaque version en circulation,
+-- avec son nombre de messages et de sources indépendantes. Lu seulement par les habitants qui ont le canal « groupe ».
+CREATE FUNCTION rag_collectif(p_run text)
+RETURNS TABLE (sujet text, valeur text, nb_messages int, sources int, officiel boolean) LANGUAGE sql STABLE SET search_path = memoire AS $$
+    SELECT f.sujet, f.valeur, f.nb_messages, cardinality(f.sources), f.officiel
+    FROM fait_collectif f
+    WHERE f.run_id = p_run AND f.sujet IN ('pont', 'danger')
+    ORDER BY f.sujet, f.nb_messages DESC
+$$;
+
+-- Recherche par le sens (pgvector), si l'extension est disponible : embeddings des documents (calculés par Ollama)
+-- et fusion des deux classements (plein texte + sens) par rangs réciproques, comme le RAG hybride de sim/rag.py.
+DO $$ BEGIN
+    BEGIN CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public;
+    EXCEPTION WHEN OTHERS THEN RAISE NOTICE 'pgvector absent : recherche plein texte seulement'; END;
+    IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'vector') THEN
+        EXECUTE 'ALTER TABLE memoire.document ADD COLUMN embedding public.vector';
+        EXECUTE $f$
+            CREATE FUNCTION memoire.rag_documents_hybride(p_question text, p_vecteur public.vector, k int DEFAULT 2)
+            RETURNS TABLE (doc_id text, score numeric) LANGUAGE sql STABLE SET search_path = memoire, public AS $q$
+                WITH q AS (SELECT requete_ou(p_question) AS q),
+                lex AS (SELECT d.doc_id, row_number() OVER (ORDER BY ts_rank(d.tsv, q.q) DESC, d.doc_id) AS r
+                        FROM document d, q WHERE d.tsv @@ q.q),
+                sens AS (SELECT d.doc_id, row_number() OVER (ORDER BY d.embedding <=> p_vecteur, d.doc_id) AS r
+                         FROM document d WHERE d.embedding IS NOT NULL AND vector_dims(d.embedding) = vector_dims(p_vecteur))
+                SELECT d.doc_id, round((coalesce(1.0 / (60 + lex.r), 0) + coalesce(1.0 / (60 + sens.r), 0))::numeric, 5)
+                FROM document d LEFT JOIN lex USING (doc_id) LEFT JOIN sens USING (doc_id)
+                WHERE lex.r IS NOT NULL OR sens.r IS NOT NULL
+                ORDER BY 2 DESC, d.doc_id LIMIT k
+            $q$ $f$;
+
+        -- Embeddings des souvenirs. Un message relayé se retrouve à l'identique dans des dizaines de mémoires : le vecteur
+        -- est calculé UNE fois par contenu (cle) et rangé ici. La simulation remplit cette table en arrière-plan
+        -- (sim/memoire_pg.py) ; un souvenir pas encore vectorisé reste trouvable par ses mots.
+        EXECUTE 'CREATE TABLE memoire.vecteur (cle text PRIMARY KEY, texte text NOT NULL, modele text NOT NULL, embedding public.vector NOT NULL)';
+        -- Questions vectorisées à l'avance, pour les démos et le banc d'évaluation (python memoire_pg.py vecteurs).
+        EXECUTE 'CREATE TABLE memoire.question (question text PRIMARY KEY, modele text NOT NULL, embedding public.vector NOT NULL)';
+
+        -- Souvenirs : le score de rag_souvenirs (mots, sujets, personnes, fraîcheur) + poids × proximité de sens (1 - distance cosinus).
+        -- Poids 0,5 : le meilleur réglage sur le banc de questions reformulées (python eval_rag.py souvenirs).
+        -- « le pont est coupé » retrouve alors « le Pont Central est FERMÉ », sans un seul mot en commun.
+        EXECUTE $f$
+            CREATE FUNCTION memoire.rag_souvenirs_hybride(p_run text, p_agent text, p_question text, p_sujets text[], p_personnes text[],
+                                                          t numeric, p_vecteur public.vector, k int DEFAULT 3, poids numeric DEFAULT 0.5)
+            RETURNS TABLE (texte text, score numeric, sens numeric) LANGUAGE sql STABLE SET search_path = memoire, public AS $q$
+                SELECT x.texte, round(x.sc::numeric, 4), round(x.sim::numeric, 4) FROM (
+                    SELECT s.texte, s.t_sim, coalesce(1 - (v.embedding <=> p_vecteur), 0) AS sim,
+                           coalesce(ts_rank(s.tsv, q.q, 32), 0)
+                           + cardinality(ARRAY(SELECT unnest(s.tags) INTERSECT SELECT unnest(p_sujets)))
+                           + cardinality(ARRAY(SELECT unnest(s.tags) INTERSECT SELECT unnest(p_personnes)))
+                           + s.t_sim / 1e6 + importance(s.tags, s.texte) / 1e3
+                           + poids * coalesce(1 - (v.embedding <=> p_vecteur), 0) AS sc
+                    FROM souvenir s
+                    CROSS JOIN (SELECT requete_ou(p_question) AS q) q
+                    LEFT JOIN vecteur v ON v.cle = s.cle AND vector_dims(v.embedding) = vector_dims(p_vecteur)
+                    WHERE s.run_id = p_run AND s.agent_id = p_agent AND s.t_sim <= t) x
+                WHERE x.sc > 0.05
+                ORDER BY x.sc DESC, x.t_sim DESC LIMIT k
+            $q$ $f$;
+    END IF;
+END $$;
+CREATE INDEX souvenir_cle ON souvenir (cle);
+
 -- Contrôle d'accès : un habitant (rôle agent_sim) ne lit QUE sa mémoire privée, les messages qu'il a écrits ou reçus,
 -- et tout le tableau commun. Le simulateur choisit l'habitant avec SET memoire.agent = 'A05'.
 DO $$ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'agent_sim') THEN CREATE ROLE agent_sim NOLOGIN; END IF;
 END $$;
 GRANT USAGE ON SCHEMA memoire TO agent_sim;
-GRANT SELECT ON souvenir, souvenir_compact, message, reception, fait_collectif, tableau_commun, agent, run TO agent_sim;
+GRANT SELECT ON souvenir, souvenir_compact, message, reception, fait_collectif, tableau_commun, agent, run, document TO agent_sim;
 GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA memoire TO agent_sim;
 
 ALTER TABLE souvenir  ENABLE ROW LEVEL SECURITY;
@@ -312,3 +424,6 @@ CREATE POLICY mes_messages ON message   TO agent_sim USING (
     auteur = current_setting('memoire.agent', true)
     OR EXISTS (SELECT 1 FROM reception r WHERE r.run_id = message.run_id AND r.msg_id = message.msg_id AND NOT r.perdu));
     -- la sous-requête sur reception passe elle-même par la politique mes_receptions : seules MES réceptions comptent
+
+-- En dernier : la version. Si l'installation s'arrête avant, la simulation saura que le schéma est incomplet.
+COMMENT ON SCHEMA memoire IS 'ALERTE memoire v3';

@@ -2,7 +2,8 @@
 Repère de la fiche : 1 unité = 1 m, X d'ouest en est (-60..60), Z de -40 à +40, Y = hauteur.
 Rive sud (Quais) = Z positifs, rive nord (Hauteurs, Gymnase) = Z négatifs, comme dans les coordonnées de la fiche.
 Tout est déterministe : le même scénario donne la même crue, ce qui permet de comparer les runs."""
-import heapq, math, os
+import functools, heapq, math, os
+from collections import OrderedDict
 
 # WORLD_SCALE (écart à la fiche si ≠ 1) : écarte rues, maisons, refuges et relief d'un facteur S. Les objets gardent leur taille
 # (rivière de 14 m, ponts de 18 et 24 m, bâtiments, habitants) ; seuls les trajets s'allongent. 1 = dimensions exactes de la fiche.
@@ -24,6 +25,7 @@ def t_of(hhmm):                                    # "09:20" -> minutes depuis m
     h, m = hhmm.split(":"); return int(h) * 60 + int(m)
 def hm(t): t = max(0.0, t); return f"{int(t // 60):02d}:{int(t % 60):02d}"
 
+@functools.lru_cache(maxsize=1 << 16)                             # le relief ne change pas : même point, même altitude
 def ground(x, z):
     """Altitude du sol (m). Lit de la rivière creusé, rive sud basse (les Quais), rive nord qui monte vers les Hauteurs.
     Une ancienne boucle de la rivière rend le secteur de l'école plus bas : il est inondé plus tôt (dilemme : refuge proche mais exposé)."""
@@ -52,7 +54,7 @@ CRUES = {
 class Flood:
     """Niveau d'eau Y(t). Avant le débordement, la rivière remplit son lit (fond + 0,15 m -> berges à 0 m).
     Ensuite elle déborde sur les Quais (étape 2 de la fiche) et monte jusqu'au pic du scénario, plus ou moins vite selon CRUE."""
-    def __init__(s, peak, kind="rapide", t0=t_of("09:00")):
+    def __init__(s, peak, kind="rapide", t0=540.0):           # 540 = 09:00
         c = CRUES.get(kind, CRUES["rapide"]); s.kind = kind if kind in CRUES else "rapide"
         s.peak, s.t0, s.t_bank, s.t_peak, s.k = round(peak * c["mult"], 3), t0, t_of(c["bank"]), t_of(c["peak"]), c["k"]
         s.base = BED_Y + 0.15
@@ -174,17 +176,21 @@ def zone_refuge(x):
 
 def ekey(a, b): return (a, b) if a < b else (b, a)
 
+STAIRS_KEY = ekey(*STAIRS)
+TREES_MAX = 512                                                   # arbres de plus courts chemins gardés en mémoire (LRU)
+
 class Streets:
     def __init__(s):
-        s.nodes = dict(NODES); s.adj = {}; s.meta = {}
+        s.nodes = dict(NODES); s.adj = {}; s.meta = {}; s.trees = OrderedDict(); s.tree_hits = s.tree_miss = 0
         for a, b, w, nm in EDGES: s._link(a, b, w, nm)
     def _link(s, a, b, w=LOCAL, nm="allée"):
-        (x1, z1), (x2, z2) = s.nodes[a], s.nodes[b]; d = math.hypot(x1 - x2, z1 - z2)
-        s.adj.setdefault(a, []).append((b, d)); s.adj.setdefault(b, []).append((a, d)); s.meta[ekey(a, b)] = (w, nm)
+        (x1, z1), (x2, z2) = s.nodes[a], s.nodes[b]; d = math.hypot(x1 - x2, z1 - z2); k = ekey(a, b)
+        s.adj.setdefault(a, []).append((b, d, k)); s.adj.setdefault(b, []).append((a, d, k)); s.meta[k] = (w, nm)
+        s.trees.clear()                                           # le réseau change (maisons ajoutées au début) : chemins à recalculer
     def add_home(s, aid, x, z):
         """Relie la porte d'un habitant au point le plus proche d'une rue (une petite allée)."""
         best = None
-        for (a, b), (w, nm) in list(s.meta.items()):
+        for (a, b), (_, nm) in list(s.meta.items()):
             if nm in ("Pont Central", "Passage des Hauteurs") or "parvis" in nm: continue
             (x1, z1), (x2, z2) = s.nodes[a], s.nodes[b]
             dx, dz = x2 - x1, z2 - z1; L2 = dx * dx + dz * dz or 1.0
@@ -196,18 +202,31 @@ class Streets:
         w, nm = s.meta[ekey(a, b)]
         s._link(entry, a, w, nm); s._link(entry, b, w, nm); s._link(home, entry, 2.0, "allée")
         return home
-    def path(s, src, dst, blocked=frozenset(), avoid_stairs=False, cost=None):
-        """Dijkstra. blocked = arêtes que l'agent croit (ou sait) fermées. cost(a, b, d) permet de pénaliser l'eau connue."""
-        dist, prev, pq = {src: 0.0}, {}, [(0.0, src)]
+    def tree(s, src, blocked=frozenset(), avoid_stairs=False):
+        """Dijkstra depuis src vers tous les nœuds : (distances, prédécesseurs). Un seul parcours sert pour tous les refuges ;
+        les mêmes questions reviennent sans cesse (chaque réflexion, chaque pas de la vérité) : les arbres sont gardés (LRU).
+        Mêmes chemins qu'un Dijkstra arrêté à l'arrivée : un nœud sorti du tas ne change plus de prédécesseur."""
+        blocked = blocked if isinstance(blocked, frozenset) else frozenset(blocked)
+        if avoid_stairs: blocked = blocked | {STAIRS_KEY}
+        key = (src, blocked)
+        t = s.trees.get(key)
+        if t is not None: s.trees.move_to_end(key); s.tree_hits += 1; return t
+        s.tree_miss += 1
+        dist, prev, pq, adj, inf = {src: 0.0}, {}, [(0.0, src)], s.adj, math.inf
+        pop, push = heapq.heappop, heapq.heappush
         while pq:
-            d, u = heapq.heappop(pq)
-            if u == dst: break
-            if d > dist.get(u, 1e18): continue
-            for v, L in s.adj.get(u, []):
-                k = ekey(u, v)
-                if k in blocked or (avoid_stairs and k == ekey(*STAIRS)): continue
-                nd = d + (cost(u, v, L) if cost else L)
-                if nd < dist.get(v, 1e18): dist[v], prev[v] = nd, u; heapq.heappush(pq, (nd, v))
+            d, u = pop(pq)
+            if d > dist[u]: continue
+            for v, L, k in adj.get(u, ()):
+                if k in blocked: continue
+                nd = d + L
+                if nd < dist.get(v, inf): dist[v] = nd; prev[v] = u; push(pq, (nd, v))
+        s.trees[key] = (dist, prev)
+        if len(s.trees) > TREES_MAX: s.trees.popitem(last=False)
+        return dist, prev
+    def path(s, src, dst, blocked=frozenset(), avoid_stairs=False):
+        """Plus court chemin de src à dst. blocked = arêtes que l'agent croit (ou sait) fermées. (None, inf) si impossible."""
+        dist, prev = s.tree(src, blocked, avoid_stairs)
         if dst not in dist: return None, math.inf
         p = [dst]
         while p[-1] != src: p.append(prev[p[-1]])

@@ -4,7 +4,8 @@ observer -> interpréter -> agir -> communiquer -> mettre à jour la mémoire.
 - Agents LLM : le LLM interprète, justifie et rédige le message ; le code garde la main sur ce qui est possible
   (contacts, temps, déplacements). Si le LLM échoue, l'agent applique ses règles pour ce tour (A4)."""
 import math
-from world import REFUGES, REFUGE_R, BRIDGE, STAIRS, ekey, hm, via_of, speed_factor
+from graphe import GRAPHE
+from world import REFUGES, BRIDGE, STAIRS, ekey, hm, via_of, speed_factor
 STATE_FR = {"home": "chez soi", "preparing": "se prépare", "walking": "en route", "blocked": "bloqué(e)", "arrived": "au refuge", "sheltered": "à l'abri à l'étage", "victim": "victime"}
 
 WALK = 1.2                                   # m/s, vitesse de référence de la fiche
@@ -26,19 +27,21 @@ class Agent:
         s.p = p; s.id, s.name = p["id"], p["name"]; s.kind = p["engine"]; s.model = None; s.rng = rng
         s.x, s.z = float(p["pos"][0]), float(p["pos"][1]); s.home = home_node; s.node = home_node
         s.mem = [(540.0, m, {"souvenir"}) for m in p.get("memory", [])]
-        s.inbox = []; s.seen_msgs = set(); s.sent_keys = set()
+        s.inbox = []; s.pending = []; s.n_pending = 0; s.seen_msgs = set(); s.sent_keys = set(); s.sink = None
         # état mental (fiche) : risque 0-100, confiance 1-5, refuge préféré, certitude
-        s.risk = 0; s.bridge = "inconnu"; s.bridge_cert = 0.0; s.danger = False; s.refuge = "aucun"; s.certainty = 0.0
+        s.risk = 0; s.bridge = "inconnu"; s.bridge_cert = 0.0; s.danger = False; s.refuge = "aucun"
         s.confirm = set(); s.local_obs = False; s.known_blocked = set(); s.water_seen = 0.0
         s.state = "home"; s.t_ready = None; s.t_depart = None; s.t_arrive = None; s.path = []; s.seg = 0; s.via = "aucun"
-        s.wet = 0.0; s.why = "chez soi, ne sait pas encore qu'une crue arrive"; s.last_action = "rester"; s.last_retrieved = []
-        s.dirty = True; s.next_think = 540.0; s.last_think = -1e9; s.thinking = False; s.verify_until = None; s.verify_topic = None
-        s.departed_contacts = set(); s.blocked_since = None; s.going_home = False; s.distress_since = None
+        s.wet = 0.0; s.why = "chez soi, ne sait pas encore qu'une crue arrive"; s.last_retrieved = []
+        s.dirty = True; s.next_think = 540.0; s.last_think = -1e9; s.thinking = False; s.verify_until = None
+        s.departed_contacts = set(); s.going_home = False; s.distress_since = None
         s.inbox_read = []; s.checked = set(); s.known_full = set(); s.bridge_seen = False; s.via_pref = None
         s.family = set(); s.family_called = False; s.pace = None      # family : autres membres du foyer (World) ; pace : allure du groupe familial
 
     # ---------- perception ----------
-    def remember(s, t, text, *tags): s.mem.append((t, text, set(tags))); del s.mem[:-60]
+    def remember(s, t, text, *tags, msg=None):
+        s.mem.append((t, text, set(tags))); del s.mem[:-60]
+        if s.sink: s.sink(s, t, text, tags, msg)                  # copie dans PostgreSQL (World), qui garde tout
 
     def trust_of(s, src, canal=None):
         if src == "mairie": return s.p["trust_off"]
@@ -127,7 +130,8 @@ class Agent:
                 f"Tu parles comme une vraie personne du quartier, en français, jamais comme un assistant. Tu ne sais que ce que tu as vu, lu ou entendu. "
                 f"Réponds uniquement en JSON.")
 
-    def schema(s, contacts):
+    @staticmethod
+    def schema():
         return {"type": "object", "properties": {
             "croyance": {"type": "object", "properties": {"pont_central": {"type": "string", "enum": ["ouvert", "ferme", "inconnu"]},
                                                           "refuge": {"type": "string", "enum": [*REFUGES, "aucun"]},
@@ -138,9 +142,8 @@ class Agent:
             "justification": {"type": "string"}, "message": {"type": "string"}},
             "required": ["croyance", "risque", "action", "itineraire", "justification", "message"]}
 
-    async def llm_decide(s, w, now, retrieve):
-        focus = "pont central fermé ouvert rumeur vérifier" if any(m["claims"].get("bridge") for m in s.inbox_read[-3:]) else "crue évacuation refuge itinéraire"
-        r = await retrieve(s, focus)
+    async def llm_decide(s, w, now, r):
+        """r : ce que le RAG a retrouvé (nœud se_souvenir du graphe). Renvoie la décision validée, ou None (secours : règles)."""
         msgs = "\n".join(f"- {hm(m['t_deliver'])}, de {who(m['src'], w.agents)} {CANAL_FR.get(m.get('canal'), '')}" + (f" (relayé, source d'origine : {who(m['origin'], w.agents)})" if m["origin"] != m["src"] else "")
                          + f" : « {m['text']} »" + (" [vérifié]" if m.get("verified") else "") for m in s.inbox_read[-6:]) or "- (aucun)"
         here = f"{int(s.water_seen * 100)} cm d'eau devant chez toi" if s.water_seen >= .05 else "de l'eau visible dans la rue" if s.water_seen > 0 else "pas d'eau visible près de toi"
@@ -154,13 +157,13 @@ class Agent:
         user = (f"Il est {hm(now)}. Tu es {state}. Observation : {here}.\n"
                 f"Ce que tu crois : pont central {s.bridge}, refuge visé {s.refuge}, danger imminent {'oui' if s.danger else 'non'}.\n"
                 f"Messages reçus (les plus récents) :\n{msgs}\n"
-                f"Ta famille sous ton toit : {fam}.\nTes contacts directs : {contacts}.\nCe que tu retrouves (documents du quartier et souvenirs) :\n" + "\n".join("- " + x for x in r["strings"]) + "\n"
-                f"Refuges : " + ", ".join(f"{R['name']} ({k}, rive {R['bank']}, {R['cap']} places{', ' + R['note'] if R['note'] else ''})" for k, R in REFUGES.items()) + ".\n"
-                f"Actions : rester, preparer_depart, partir, changer_itineraire, relayer (transmettre à tes contacts), verifier (appeler le poste municipal, 3 min), corriger (signaler une erreur à tes contacts).\n"
-                f"Réponds : croyance (pont_central, refuge, danger_imminent), risque (0-100), action, itineraire, justification (15 mots au plus, en citant ce qui t'a convaincu), "
-                f"message (ce que tu écris à tes contacts, une phrase courte avec la source et l'heure, ou \"\" si tu n'écris pas).")
-        o = await w.llm.ask(s, s.kind, s.system_prompt(w), user, s.schema(s.p["contacts"]))
-        if o is None: return None, r
+                f"Ta famille sous ton toit : {fam}.\nTes contacts directs : {contacts}.\nCe que tu retrouves (documents du quartier, souvenirs, ce que dit le groupe du quartier) :\n" + "\n".join("- " + x for x in r["strings"]) + "\n"
+                "Refuges : " + ", ".join(f"{R['name']} ({k}, rive {R['bank']}, {R['cap']} places{', ' + R['note'] if R['note'] else ''})" for k, R in REFUGES.items()) + ".\n"
+                "Actions : rester, preparer_depart, partir, changer_itineraire, relayer (transmettre à tes contacts), verifier (appeler le poste municipal, 3 min), corriger (signaler une erreur à tes contacts).\n"
+                "Réponds : croyance (pont_central, refuge, danger_imminent), risque (0-100), action, itineraire, justification (15 mots au plus, en citant ce qui t'a convaincu), "
+                "message (ce que tu écris à tes contacts, une phrase courte avec la source et l'heure, ou \"\" si tu n'écris pas).")
+        o = await w.llm.ask(s, s.kind, s.system_prompt(w), user, s.schema())
+        if o is None: return None
         try:
             c = o["croyance"]; act = o["action"]
             assert act in ACTIONS and c["pont_central"] in ("ouvert", "ferme", "inconnu") and (c["refuge"] in REFUGES or c["refuge"] == "aucun")
@@ -169,39 +172,24 @@ class Agent:
                        via=o.get("itineraire") if o.get("itineraire") in ("pont_central", "passage_hauteurs") else None, latency_ms=o.get("_latency_ms"),
                        model=o.get("_model"), api=o.get("_api"))
         except Exception as ex:
-            await w.incident(s, "invalid_output", f"{ex!r} {str(o)[:100]}"); return None, r
+            await w.incident(s, "invalid_output", f"{ex!r} {str(o)[:100]}"); return None
         if out["bridge"] != "inconnu" and not any(m["claims"].get("bridge") for m in s.inbox_read) and not s.bridge_seen:
             await w.incident(s, "unsupported_belief", f"croit le pont {out['bridge']} sans aucune information reçue")   # C6/Q5 : croyance sans source
-        return out, r
+        return out
 
     # ---------- un tour de réflexion ----------
     async def think(s, w, retrieve):
-        now = w.clock.now(); t_info = now
-        s.inbox_read = [m for m in s.inbox if m["t_deliver"] <= now]
-        for m in s.inbox_read:
-            if m["t_deliver"] > t_info: w.stats.viol += 1           # C6 : jamais un message utilisé avant d'être remis
-        s.dirty = False; s.next_think = now + w.think_every; s.last_think = now
-        if s.state in ("arrived", "sheltered", "victim") or (s.state == "walking" and s.kind != "rule"): return     # en marche, un agent LLM ne délibère pas (sobriété)
-        if s.state == "blocked":                                     # réessaie un autre chemin avec ce qu'il sait maintenant
-            await s.reroute(w, now, None, "cherche un autre chemin")
-            if s.state == "blocked": return
-        decided_by, r, d = "rule", None, None
-        if s.kind != "rule" and s.state not in ("walking",):
-            s.thinking = True
-            try: d, r = await s.llm_decide(w, t_info, retrieve)
-            finally: s.thinking = False
-            if d: decided_by = s.kind
-        if d is None:
-            d = await s.rule_decide(w, w.clock.now())
-        else:
-            s.risk = max(0, min(100, d["risk"]))
-            if d["bridge"] != s.bridge: s.bridge, s.bridge_cert = d["bridge"], .7
-            s.danger = d["danger"]
-            if d["refuge"] != "aucun": s.refuge = d["refuge"]
+        """Un tour de réflexion = un passage dans le graphe LangGraph de sim/graphe.py (observer, se souvenir, décider, agir)."""
+        try: await GRAPHE.ainvoke({"agent": s, "monde": w, "chercher": retrieve, "chemin": []})
+        finally: s.thinking = False
+
+    async def conclude(s, w, d, decided_by, r, t_info, chemin):
+        """Nœud agir du graphe : trace la décision (agent.think, avec le chemin suivi), publie les croyances, applique l'action."""
         now2 = w.clock.now()
-        s.why = d["justification"] or s.why; s.last_action = d["action"]; s.last_retrieved = r["strings"] if r else []
+        s.why = d["justification"] or s.why; s.last_retrieved = r["strings"] if r else []
         await w.emit("agent.think", s.id, action=d["action"], why=s.why, decider=decided_by, model=d.get("model") if decided_by != "rule" else None, api=d.get("api"),
-                     t_info=round(t_info, 2), risk=s.risk, latency_ms=d.get("latency_ms"), retrieved=s.last_retrieved, retrieved_meta=r["meta"] if r else [], query=r["query"] if r else "")
+                     t_info=round(t_info, 2), risk=s.risk, latency_ms=d.get("latency_ms"), retrieved=s.last_retrieved, retrieved_meta=r["meta"] if r else [], query=r["query"] if r else "",
+                     memoire=r.get("source") if r else None, chemin=chemin)
         await s.publish_belief(w)
         await s.apply(w, d, now2)
 
@@ -231,7 +219,6 @@ class Agent:
                     if (m["src"] == "mairie" or s.trust_msg(m) >= 3) and s.rng.random() < s.p["relay"]:
                         keep = s.rng.random() > (.3 if s.p["relay"] > .7 else .1)        # la source se perd parfois en route
                         await w.send(s, m["text"], m["claims"], "relais", origin=m["origin"] if keep else s.id, hops=m["hops"] + 1, parent=m["id"])
-            if a == "corriger" and s.kind == "rule": pass
         elif msg:
             kind = {"relayer": "relais", "corriger": "correction"}.get(a, "message")
             claims = {"bridge": s.bridge if s.bridge != "inconnu" else None, "danger": s.danger, "refuge": s.refuge if s.refuge != "aucun" else None,
@@ -267,7 +254,6 @@ class Agent:
             s.state = "sheltered"
             s.remember(now, f"{hm(now)} — aucun chemin sûr ({reason}), ni pour rentrer : je monte dans le bâtiment le plus proche", "abri")
             await w.emit("agent.shelter", s.id, reason=f"{reason} : bâtiment le plus proche"); return
-        if s.state != "blocked": s.blocked_since = now
         s.state = "blocked"; await w.emit("agent.blocked", s.id, reason=reason, at=s.node)
 
     async def depart(s, w, now, via=None):
@@ -322,7 +308,6 @@ class Agent:
                 await s.reroute(w, now, None, "rue inondée"); continue
             v = WALK * (s.pace or s.p["mob"]) * speed_factor(w.flood.depth(s.x, s.z, now))   # en famille : à l'allure du plus lent
             if v <= 0:
-                if s.state != "blocked": s.blocked_since = now
                 s.state = "blocked"; await w.emit("agent.blocked", s.id, reason="eau trop haute ici", at=s.node); return
             d = math.hypot(bx - s.x, bz - s.z)
             if v * left >= d:

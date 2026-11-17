@@ -1,8 +1,9 @@
 # Mémoire individuelle, partagée et collective dans PostgreSQL
 
-Dans la simulation, chaque habitant garde sa mémoire en RAM (`Agent.mem`, 60 souvenirs au plus) et tout ce qui se passe
-part sur Kafka puis dans `data/runs/<run_id>.jsonl`. Ce dossier montre comment **PostgreSQL** peut porter cette mémoire :
-la stocker, la partager entre habitants, la protéger, et l'interroger avec des requêtes.
+Chaque habitant garde un journal de mémoire (`Agent.mem`, 60 souvenirs au plus pour son travail en cours). **PostgreSQL** porte
+cette mémoire : la simulation l'y écrit pendant le run et y cherche avant chaque décision (le RAG des agents), et la base
+permet de la partager entre habitants, de la protéger et de l'interroger avec des requêtes. Les runs déjà enregistrés
+(`data/runs/<run_id>.jsonl`) peuvent aussi y être chargés.
 
 ```
 lancer_postgres.bat          crée la base « alerte », charge deux runs, ouvre psql
@@ -12,6 +13,10 @@ postgres/03_demo.sql         la démo : 11 étapes de requêtes commentées
 postgres/03_demo_pgadmin.sql la même, pour pgAdmin (une requête à la fois, F5)
 postgres/04_demo_relation.sql le lien entre les 3 mémoires, en suivant une information
 postgres/05_demo_optimisation.sql optimiser la mémoire : fusion, oubli par importance, résumé, index
+postgres/06_demo_rag_langgraph.sql le RAG des agents dans PostgreSQL, et le graphe LangGraph vu depuis la base
+postgres/07_demo_embeddings.sql les embeddings des souvenirs : chercher par le sens, mots seuls contre mots + sens
+sim/memoire_pg.py            la simulation écrit et lit cette mémoire pendant le run
+sim/graphe.py                le cycle de décision de chaque habitant, en graphe LangGraph
 ```
 
 ## Le modèle : trois niveaux de mémoire
@@ -39,8 +44,9 @@ Idées clés à expliquer :
 
 ## Lancer
 
-Double-cliquer `lancer_postgres.bat` : il démarre PostgreSQL dans Docker (conteneur `alerte-postgres`, port 5440,
-mot de passe `alerte`), charge les runs au premier lancement (`lancer_postgres.bat reset` pour repartir de zéro), puis ouvre psql :
+Double-cliquer `lancer_postgres.bat` : il démarre le service `postgres` du docker compose (pgvector, port 5440,
+mot de passe `alerte`), charge les deux runs d'exemple s'ils n'y sont pas (`lancer_postgres.bat reset` pour repartir de zéro,
+ce qui efface aussi les runs écrits en direct), puis ouvre psql :
 
 ```
 \i postgres/03_demo.sql
@@ -98,9 +104,53 @@ SELECT memoire.partager('7086a147', 'A10', 'Le pont est fermé', '{"bridge":"fer
 
 Ces mécanismes sont dans la base seulement ; la simulation Python garde son oubli « premier entré, premier sorti ».
 
+## Dans la simulation : le RAG des agents et le graphe LangGraph
+
+Avec `docker compose up`, un service **postgres** (image `pgvector/pgvector:pg16`, port 5440, mot de passe `alerte`) démarre
+avec le reste. La simulation y crée le schéma s'il manque, copie les documents du quartier et leurs embeddings, puis, pendant
+chaque run, écrit en direct le journal de chaque habitant, les messages, leurs réceptions (avec l'heure de lecture), les
+croyances et l'état réel du monde. C'est la même base que la démo : pgAdmin et `lancer_postgres.bat` voient aussi les runs en direct.
+
+Avant chaque décision, un agent LLM passe par le nœud `se_souvenir` du graphe LangGraph, qui appelle trois fonctions SQL :
+
+| fonction | ce qu'elle renvoie | mémoire |
+|---|---|---|
+| `rag_souvenirs_hybride(run, agent, question, sujets, personnes, t, vecteur, k, poids)` | ses 3 souvenirs les plus utiles, vécus avant l'heure t, par les mots et le sens (`rag_souvenirs` : les mots seuls) | individuelle |
+| `rag_documents(question, k)` / `rag_documents_hybride(question, vecteur, k)` | les 2 documents du quartier les plus pertinents (plein texte, + sens avec pgvector) | connaissances |
+| `rag_collectif(run)` | chaque version du pont et du danger, avec messages et sources (si l'habitant est au groupe du quartier et que le réseau passe) | collective |
+
+Les messages reçus sont la mémoire **partagée** : ils entrent dans le journal du destinataire à l'heure où il les lit.
+Chaque décision (`agent.think`) garde dans la base ce que le RAG a retrouvé et le chemin suivi dans le graphe :
+`postgres/06_demo_rag_langgraph.sql` le montre (étapes 5 et 6 : lancer d'abord un run avec la simulation).
+
+Si PostgreSQL ne répond pas, la simulation passe seule à la mémoire en RAM (`memoire = ram` dans `metrics` et `run.end`).
+`MEMOIRE=ram` dans `.env` force ce mode.
+
+## Embeddings des souvenirs (`07_demo_embeddings.sql`)
+
+Chaque souvenir a un vecteur de 768 nombres (`nomic-embed-text`) qui représente son **sens**. Pendant le run, un vectoriseur
+en arrière-plan (`sim/memoire_pg.py`) calcule le vecteur de chaque nouveau contenu et le range dans `memoire.vecteur`
+(clé = le texte sans l'heure : un message relayé vers 30 habitants n'est calculé qu'une fois). Le rappel
+`rag_souvenirs_hybride` ajoute 0,5 × la proximité de sens (1 − distance cosinus) au score des mots.
+
+`docker compose run --rm --no-deps sim python eval_rag.py souvenirs` vectorise ce qui manque (runs chargés depuis un fichier),
+range les questions de démo dans `memoire.question` et compare, sur des questions reformulées :
+
+| rappel | hit@3 | MRR |
+|---|---|---|
+| mots seuls | 0,17 | 0,17 |
+| mots + sens, poids 0,5 (défaut) | **0,90** | **0,80** |
+| mots + sens, poids 4 | 0,78 | 0,55 |
+
+Exemple : « un inconnu raconte qu'il ne faut plus emprunter l'ouvrage » ne retrouve rien par les mots ; par le sens,
+la rumeur « Le Pont Central est fermé, il ne faut plus passer par là ! » arrive en tête.
+
 ## Limites et suite possible
 
-- Les données viennent des runs enregistrés : la simulation garde sa mémoire en RAM pendant le run. Brancher un consommateur
-  Kafka (`alerte.events`) qui insère dans ces tables donnerait la même base **en direct**, sans toucher aux agents.
-- Le rappel est lexical. Les embeddings du RAG (Ollama) pourraient aller dans une colonne `vector` avec l'extension `pgvector`.
-- Les souvenirs initiaux des profils (ex. Karim et la crue de 2019) ne sont pas dans les événements, donc pas chargés.
+- Les vecteurs des souvenirs sont cherchés sans index (recherche exacte) : un habitant n'a que quelques dizaines de souvenirs.
+  Pour chercher dans tout le quartier à grande échelle, un index HNSW sur `vector(768)` serait l'étape suivante.
+- Le banc des embeddings est petit (8 questions, 69 cas, un run) : le poids 0,5 est un premier réglage.
+- Les optimisations (fusion, oubli par importance, résumé) sont dans la base, mais le RAG de la simulation ne les utilise pas
+  encore : il cherche dans tout le journal de l'habitant, avec l'importance seulement pour départager.
+- Les souvenirs initiaux des profils (ex. Karim et la crue de 2019) sont dans les runs écrits en direct, mais pas dans les
+  runs chargés depuis un fichier JSONL (ils ne sont pas dans les événements).

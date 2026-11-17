@@ -72,7 +72,9 @@ WHERE txt IS NOT NULL ORDER BY seq;
 
 -- 5. mémoire partagée : messages puis réceptions (les déclencheurs remplissent le tableau commun et les souvenirs reçus)
 CREATE TEMP TABLE msg AS
-SELECT run_id, data->>'msg_id' AS msg_id, agent_id AS auteur, data->>'origin' AS origine, data->>'parent' AS parent,
+SELECT run_id, data->>'msg_id' AS msg_id, agent_id AS auteur,
+       CASE data->>'origin' WHEN 'anonyme' THEN 'rumeur' ELSE data->>'origin' END AS origine,   -- relais d'une rumeur : même source
+       data->>'parent' AS parent,
        coalesce((data->>'hops')::int, 0) AS sauts, coalesce(data->>'kind', 'message') AS genre, data->>'text' AS texte,
        coalesce(data->'claims', '{}') AS claims, t_sim, seq, data->'to' AS dest, data->'canaux' AS canaux
 FROM ev WHERE type = 'agent.say'

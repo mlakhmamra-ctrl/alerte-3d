@@ -13,22 +13,38 @@ class Indicators:
         s.msg = {"message": 0, "relais": 0, "correction": 0, "observation": 0, "rumeur": 0, "officiel": 0}
         s.distress, s.victims, s.damage = set(), set(), {}; s.n_houses = len({x.get("famille") for x in start.get("agents", [])})
         s.verified = 0; s.lost = 0; s.network_up = True; s.by_canal = {}; s.rumor_relays = 0; s.rumor_corrected = False; s.rumor_ids = set(); s.cc_last = None; s.cc_area = 0.0; s.cc_span = 0.0
-    def feed(s, ev):
-        """Renvoie un dict d'indicateurs si l'événement les change, sinon None."""
+        s.ids = [f"A{i + 1:02d}" for i in range(s.n)]; s.idset = set(s.ids); s.good = set(); s.recheck_all()   # good : lecture juste sur les 3 faits
+    def feed(s, ev, full=True):
+        """Renvoie un dict d'indicateurs si l'événement les change, sinon None. full=False (la simulation, qui ne lit que le bilan
+        final) : met seulement à jour l'état et l'intégrale du contexte commun, sans construire tout le tableau à chaque événement."""
         t, d, a = ev["type"], ev.get("data", {}), ev.get("agent")
-        if t == "run.start": s.reset(d); return s.snap(ev)
-        if t == "world.truth": s.truth = {"bridge": d["bridge"], "danger": d["danger"], "refuges": d["refuges"]}
-        elif t == "agent.belief": s.belief[a] = (d["bridge"], d["refuge"], d["danger"])
-        elif t == "agent.depart": s.depart.setdefault(a, ev["t_sim"])
-        elif t == "agent.arrive": s.arrive[a] = d["refuge"]; s.blocked.discard(a)
+        if t == "run.start": s.reset(d); return s.snap(ev) if full else s.integrate(ev)
+        if t == "world.tick":                                         # positions : on garde le temps passé dans l'eau, sans republier
+            for p in d.get("agents", []): s.wet[p["id"]] = p.get("wet", 0)
+            return None
+        if s.feed_world(t, a, d, ev["t_sim"] if t == "agent.depart" else None) or s.feed_messages(t, d): return s.snap(ev) if full else s.integrate(ev)
+        return None
+
+    def feed_world(s, t, a, d, t_sim):
+        """Vérité du monde, croyances et devenir des habitants. Renvoie False si l'événement n'est pas de ce groupe."""
+        if t == "world.truth": s.truth = {"bridge": d["bridge"], "danger": d["danger"], "refuges": d["refuges"]}; s.recheck_all()
+        elif t == "agent.belief": s.belief[a] = (d["bridge"], d["refuge"], d["danger"]); s.recheck(a)
+        elif t == "agent.depart": s.depart.setdefault(a, t_sim)
+        elif t == "agent.arrive": s.arrive[a] = d["refuge"]; s.blocked.discard(a); s.recheck(a)
         elif t == "agent.blocked": s.blocked.add(a)
         elif t == "agent.shelter": s.sheltered.add(a); s.blocked.discard(a)
-        elif t in ("agent.reroute",): s.blocked.discard(a)
+        elif t == "agent.reroute": s.blocked.discard(a)
         elif t == "agent.distress": s.distress.add(a)
         elif t == "agent.distress_end": s.distress.discard(a)
         elif t == "agent.victim": s.victims.add(a); s.distress.discard(a); s.blocked.discard(a)
         elif t == "house.damage": s.damage[d["house"]] = d["level"]
-        elif t == "agent.say":
+        elif t == "network.down": s.network_up = False
+        else: return False
+        return True
+
+    def feed_messages(s, t, d):
+        """Messages, rumeur et sa correction, bulletins, vérifications, messages perdus. False si l'événement n'est pas de ce groupe."""
+        if t == "agent.say":
             k = d.get("kind", "message"); s.msg[k] = s.msg.get(k, 0) + 1
             for c in d.get("canaux", {}).values(): s.by_canal[c] = s.by_canal.get(c, 0) + 1
             if d.get("parent") in s.rumor_ids or d.get("origin") == "anonyme":
@@ -39,24 +55,33 @@ class Indicators:
         elif t == "official.bulletin": s.msg["officiel"] += 1
         elif t == "agent.verify_result": s.verified += 1
         elif t == "message.lost": s.lost += len(d.get("to", []))
-        elif t == "network.down": s.network_up = False
-        elif t == "world.tick":
-            for p in d.get("agents", []): s.wet[p["id"]] = p.get("wet", 0)
-            return None
-        else: return None
-        return s.snap(ev)
+        else: return False
+        return True
     def correct(s, b):
         br, rf, dg = b
         return [br == s.truth["bridge"], rf in s.truth["refuges"], dg == s.truth["danger"]]
-    def snap(s, ev):
-        n = max(1, s.n); ids = [f"A{i + 1:02d}" for i in range(s.n)]
-        bel = [s.belief.get(i, ("inconnu", "aucun", False)) for i in ids]
-        ok = [s.correct(b) for b in bel]
-        for k, i in enumerate(ids):                                   # arrivé dans un refuge : sa lecture du refuge est juste
-            if i in s.arrive: ok[k][1] = True
-        cc = sum(all(o) for o in ok) / n; t = ev.get("t_sim", -1) if ev else -1
+    def ok(s, i):
+        """Lecture de l'habitant i sur les 3 faits ; arrivé dans un refuge, sa lecture du refuge est juste."""
+        o = s.correct(s.belief.get(i, ("inconnu", "aucun", False)))
+        if i in s.arrive: o[1] = True
+        return o
+    def recheck(s, i):
+        if i in s.idset:
+            if all(s.ok(i)): s.good.add(i)
+            else: s.good.discard(i)
+    def recheck_all(s):
+        for i in s.ids: s.recheck(i)
+    def integrate(s, ev):
+        """Contexte commun à cet instant, et son intégrale dans le temps (moyenne pondérée par la durée). Renvoie None."""
+        cc = len(s.good) / max(1, s.n); t = ev.get("t_sim", -1) if ev else -1
         if t >= 0 and s.cc_last is not None and t > s.cc_last[0]: s.cc_area += s.cc_last[1] * (t - s.cc_last[0]); s.cc_span += t - s.cc_last[0]
         if t >= 0: s.cc_last = (t, cc)
+        return None
+    def snap(s, ev):
+        n = max(1, s.n); ids = s.ids
+        bel = [s.belief.get(i, ("inconnu", "aucun", False)) for i in ids]
+        ok = [s.ok(i) for i in ids]
+        s.integrate(ev); cc = len(s.good) / n
         def mode_share(vals, exclude=()):
             c = {}
             for v in vals:
