@@ -21,10 +21,10 @@ services:
       timeout: 10s
       retries: 12
 
-  kafka-init:      # crée les 4 topics (événements, commandes de Godot, indicateurs, lettres mortes)
+  kafka-init:      # crée les 5 topics (événements, commandes de Godot, indicateurs, lettres mortes, fenêtres Spark)
     image: apache/kafka:3.8.0
     depends_on: { kafka: { condition: service_healthy } }
-    entrypoint: ["/bin/sh", "-c", "for t in alerte.events alerte.commands alerte.indicators alerte.dlq; do /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic $$t; done"]
+    entrypoint: ["/bin/sh", "-c", "for t in alerte.events alerte.commands alerte.indicators alerte.dlq alerte.spark; do /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic $$t; done"]
 
   ollama:
     image: ollama/ollama:latest
@@ -52,6 +52,16 @@ services:
     ports: [ "8765:8765" ]
     depends_on: { kafka-init: { condition: service_completed_successfully } }
 
+  postgres:        # mémoire des habitants et RAG (souvenirs, messages, tableau commun, documents + pgvector) ; port 5440 pour pgAdmin / psql
+    image: pgvector/pgvector:pg16
+    environment: { POSTGRES_PASSWORD: alerte, POSTGRES_DB: alerte }
+    ports: [ "5440:5432" ]
+    volumes: [ "pgdata:/var/lib/postgresql/data" ]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d alerte"]
+      interval: 5s
+      retries: 12
+
   sim:
     build: { context: ., dockerfile: sim/Dockerfile }
     env_file: [ .env.exemple, { path: .env, required: false } ]   # .env (non versionné) remplace les valeurs du modèle
@@ -61,6 +71,7 @@ services:
       kafka-init: { condition: service_completed_successfully }
       ollama-pull: { condition: service_completed_successfully }
       gateway: { condition: service_started }
+      postgres: { condition: service_healthy }
 
   replay:          # rejeu sans aucun appel LLM :  docker compose --profile replay up replay
     build: { context: ., dockerfile: sim/Dockerfile }
@@ -70,4 +81,23 @@ services:
     volumes: [ "./data:/data" ]
     depends_on: { kafka-init: { condition: service_completed_successfully }, gateway: { condition: service_started } }
 
-volumes: { ollama: {} }
+  # Spark (spark/) : analyse distribuée des runs (batch) et agrégats en direct sur le flux Kafka (streaming). Hors du lancement normal.
+  spark-batch:     # docker compose --profile spark-batch run --rm spark-batch   -> data/spark/ (Parquet + rapport_spark.md)
+    image: apache/spark:3.5.3-scala2.12-java17-python3-ubuntu
+    profiles: [ "spark-batch" ]
+    user: root                                   # écrit dans ./data (volume monté) ; l'image tourne sinon en utilisateur « spark »
+    working_dir: /app
+    volumes: [ "./spark:/app:ro", "./data:/data" ]
+    command: ["/opt/spark/bin/spark-submit", "--master", "local[*]", "--driver-memory", "3g", "/app/analyse_spark.py"]
+
+  spark-flux:      # docker compose --profile spark up spark-flux   (avec la simulation lancée) ; fenêtres dans le topic alerte.spark
+    image: apache/spark:3.5.3-scala2.12-java17-python3-ubuntu
+    profiles: [ "spark" ]
+    user: root
+    working_dir: /app
+    environment: { KAFKA: "kafka:9092", HOME: /root }
+    volumes: [ "./spark:/app:ro", "./data:/data", "ivy:/root/.ivy2" ]   # ivy : le connecteur Kafka n'est téléchargé qu'une fois
+    command: ["/opt/spark/bin/spark-submit", "--master", "local[*]", "--packages", "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.3", "/app/flux_spark.py"]
+    depends_on: { kafka-init: { condition: service_completed_successfully } }
+
+volumes: { ollama: {}, pgdata: {}, ivy: {} }

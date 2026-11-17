@@ -96,7 +96,7 @@ def extra_llm_ids(n, k):
     ids = [f"A{12 + int(i * gen / min(k, gen)) + 1:02d}" for i in range(min(k, gen))]
     return ids, ids[::2]
 
-def population(n, llm_ids, rng: random.Random, big_ids=("A04", "A05"), small_ids=("A06", "A11")):
+def population(n, llm_ids, rng: random.Random, big_ids=("A04", "A05")):
     """n habitants. llm_ids : identifiants qui pensent avec un LLM (les autres suivent leurs règles).
     Au-delà de 12, on génère des voisins inspirés des profils de la fiche (C2 : effectif fixé au lancement).
     Ils vivent en foyers : plusieurs habitants par maison, répartis sur les emplacements libres."""

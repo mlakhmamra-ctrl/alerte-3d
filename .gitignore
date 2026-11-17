@@ -28,3 +28,12 @@ godot/export_presets.cfg
 data/etude/
 data/etude_test/
 data/etude_llm_log.txt
+
+# outils de qualité
+.pytest_cache/
+.ruff_cache/
+
+# sorties de Spark (tables Parquet, rapport, checkpoints du streaming) : régénérées par lancer_spark.bat
+data/spark/
+data/rag_eval_souvenirs.md
+data/runs/batch_*.json

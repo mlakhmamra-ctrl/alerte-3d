@@ -71,4 +71,5 @@ async def main():
         print("passerelle prête : ws://0.0.0.0:8765", flush=True)
         await consume()
 
-asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main())

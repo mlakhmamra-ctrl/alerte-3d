@@ -1,0 +1,18 @@
+{
+ "eclair_panne_rumeur_tot": {
+  "evenements": 7669,
+  "sha256": "7c7a41578625561d6f72b33ba51e0b9af9f1e2ee89c9764c4ccf2b7f2c7b798c"
+ },
+ "plan_de_la_fiche": {
+  "evenements": 830,
+  "sha256": "ec015abda1991208bb51884375d4c628984927f2abe1d864572fe7699e1b0a70"
+ },
+ "pont_ouvert_crue_lente": {
+  "evenements": 1817,
+  "sha256": "4407ef426a6bad4621fe4ed67815631e209055d4e1726c901bbaba8816d80399"
+ },
+ "reference": {
+  "evenements": 6641,
+  "sha256": "377b322d59748e4c10a5b93fcf94bfcc955aa8a461189c2e1713d31920f1af73"
+ }
+}

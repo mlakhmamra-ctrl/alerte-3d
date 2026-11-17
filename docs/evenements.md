@@ -41,15 +41,15 @@ Les champs en **gras** sont obligatoires (vérifiés par la passerelle). Les aut
 | `bridge.closed` | 09:20 en `pont_ferme`, ou commande | at |
 | `refuge.full` | un refuge atteint sa capacité | **refuge** |
 | `tick` | à chaque pas (mode sync) | **step** ; thinkers, wall_ms (temps réel du pas) |
-| `metrics` | régulièrement | statistiques LLM et RAG du moment (appels, tokens, latence) |
+| `metrics` | régulièrement | statistiques LLM et RAG du moment (appels, tokens, latence) ; memoire (`postgres` ou `ram`), pg_requetes, pg_ms (durée moyenne d'une recherche dans PostgreSQL), pg_vecteurs (pgvector actif), pg_souvenirs_vectorises (vecteurs de souvenirs calculés), pg_file (écritures en attente) |
 | `run.paused`, `run.resumed` | commande pause / reprise | — |
-| `run.end` | fin du run | **indicators** (valeurs finales) ; calls, calls_total, tokens_in, tokens_out, incidents, incidents_by_kind, temporal_violations, avg_latency_ms, p95_latency_ms, rag_*, scenario, mode, seed, n_agents, llm_agents, update_at, rumor_at, agents (résumé par habitant) |
+| `run.end` | fin du run | **indicators** (valeurs finales) ; calls, calls_total, tokens_in, tokens_out, incidents, incidents_by_kind, temporal_violations, avg_latency_ms, p95_latency_ms, rag_*, memoire, pg_*, scenario, mode, seed, n_agents, llm_agents, update_at, rumor_at, agents (résumé par habitant) |
 
 ### Habitants
 
 | type | quand | data |
 |---|---|---|
-| `agent.think` | chaque décision | **action**, **why** (justification), **decider** (`rule`, `big`, `small`, ou `rule` après un échec LLM) ; model (modèle réellement utilisé), api (API qui a répondu), t_info (heure de la dernière information utilisée), risk, latency_ms, retrieved (textes retrouvés), retrieved_meta (id, fiabilité), query |
+| `agent.think` | chaque décision | **action**, **why** (justification), **decider** (`rule`, `big`, `small`, ou `rule` après un échec LLM) ; model (modèle réellement utilisé), api (API qui a répondu), t_info (heure de la dernière information utilisée), risk, latency_ms, retrieved (textes retrouvés : documents, `(souvenir)`, `(groupe du quartier)`), retrieved_meta (id, fiabilité), query, memoire (`postgres` ou `ram` : où le RAG a cherché ; absent pour un agent à règles), chemin (étapes suivies dans le graphe LangGraph, ex. `["observer", "se_souvenir", "decider", "croire", "agir"]`) |
 | `agent.belief` | la croyance change | **bridge**, **refuge**, **danger**, **risk** ; certainty |
 | `agent.say` | un message part vers des contacts | **to**, **text**, **kind** (`relais`, `observation`, `correction`…), **origin** (source d'origine), **msg_id** ; hops, parent (message relayé), claims, decider, model, canaux (par destinataire : `face_a_face`, `telephone`, `groupe`). kind `famille` : appel au départ dans le foyer |
 | `message.lost` | destinataires injoignables | **to**, **reason** (réseau coupé, aucun canal commun) ; kind, msg_id |

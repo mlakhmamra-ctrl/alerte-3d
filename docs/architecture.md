@@ -6,8 +6,8 @@ pourquoi chaque technologie est là, et ce qui reste à faire. Les commandes pou
 ## 1. La lecture choisie : ESSAIM appliqué à ALERTE
 
 La thématique ESSAIM, c'est un groupe qui **prend une décision collective sans chef** (comme un essaim d'abeilles qui
-choisit un nouveau nid). Le professeur a demandé de remplacer la logique « abeille » par une logique **humaine**.
-La fiche ALERTE donne justement une décision collective humaine : pendant une crue, douze voisins doivent choisir
+choisit un nouveau nid). on a essayé de remplacer la logique « abeille » par une logique **humaine**.
+La fiche ALERTE donne justement une décision collective humaine : pendant une crue, les voisins doivent choisir
 **s'ils partent, quand, par où et vers quel refuge**, sans que personne ne commande.
 
 | idée ESSAIM (abeilles) | ce que ça devient dans ALERTE (humains) |
@@ -75,7 +75,7 @@ Le chemin d'une décision :
 | **Python 3 (asyncio)** | la simulation : monde, agents, RAG, horloge | asyncio permet à 12 agents de « penser » en parallèle pendant que l'eau continue de monter (mode async) |
 | **aiokafka, httpx, websockets** | bibliothèques Python pour Kafka, HTTP (Ollama) et WebSocket | asynchrones, légères |
 | **Godot 4** | la simulation finale en 3D (exigences D1 à D3) | moteur 3D libre ; GDScript est simple ; WebSocket intégré. Il tourne **hors Docker** car il a besoin de la carte graphique et d'une fenêtre |
-| **nomic-embed-text** | transforme les documents en vecteurs pour le RAG hybride | petit modèle d'embeddings disponible dans Ollama |
+| **nomic-embed-text** | transforme les documents et les souvenirs en vecteurs pour le RAG hybride (pgvector) | petit modèle d'embeddings disponible dans Ollama |
 
 Pourquoi une **passerelle** entre Kafka et Godot : Godot ne parle pas le protocole Kafka. La passerelle lit Kafka,
 vérifie chaque événement, met les mauvais dans `alerte.dlq`, calcule les indicateurs (B2) et pousse le tout en
@@ -116,15 +116,45 @@ Pourquoi ce partage (exigences A5 et E5) : le **grand modèle** va aux habitants
 | la **justification** et le **message** aux voisins, en langage naturel | la remise du message aux bons contacts, avec un délai |
 | | si la réponse est vide, hors schéma, ou si l'agent « sort de son rôle » (parle comme un assistant) : un incident `llm.incident` est publié et **l'habitant repasse sur ses règles** pour ce tour (A4) |
 
+### Le cycle de décision : un graphe LangGraph
+
+Chaque réflexion d'un habitant est un passage dans un graphe **LangGraph** (`sim/graphe.py`), le même pour tous :
+
+```
+START ──► observer ──┬── rien à décider (à l'abri, en marche...) ──────────────────────────► END
+                     ├── agent à règles ──────────────────────────────► regles ──► agir ──► END
+                     └── agent LLM ──► se_souvenir ──► decider ──┬── réponse invalide ──┘ ▲
+                                       (RAG)                      └── réponse valide ──► croire
+```
+
+`observer` lit les messages déjà arrivés ; `se_souvenir` interroge le RAG ; `decider` appelle le LLM et valide sa réponse ;
+`croire` met à jour les croyances ; `regles` décide par règles, et sert aussi de **secours** quand le LLM échoue ; `agir`
+applique l'action et publie `agent.think` avec le **chemin suivi** (champ `chemin`). Le graphe orchestre, les étapes restent
+les méthodes de l'agent (`sim/agents.py`). En mode `sync`, les agents à règles passent l'un après l'autre et dans l'ordre :
+un run 100 % règles donne exactement le même déroulé qu'avant l'ajout du graphe (vérifié événement par événement).
+
 ### Mémoire (A1) et RAG (F1, F2)
 
 - **Mémoire propre** : chaque habitant LLM garde un journal de ce qu'il a vu, lu, vérifié et décidé.
+- **Mémoire et RAG dans PostgreSQL** (`MEMOIRE=postgres`, par défaut) : pendant le run, chaque souvenir, chaque message
+  et sa réception (à l'heure où il est **lu**) partent dans PostgreSQL (`sim/memoire_pg.py`, schéma `postgres/01_schema.sql`).
+  Avant de décider, l'agent LLM y retrouve ses **3 souvenirs** les plus utiles (`rag_souvenirs`, jamais un souvenir
+  postérieur à l'heure de sa réflexion), les **2 documents** les plus pertinents (`rag_documents`, plein texte, ou
+  `rag_documents_hybride` avec pgvector) et, s'il est inscrit au **groupe du quartier** et que le réseau passe, ce que dit
+  le quartier (`rag_collectif` : chaque version du pont et du danger, avec ses sources indépendantes). Si PostgreSQL ne
+  répond pas, la simulation revient seule à la mémoire en RAM ci-dessous (sans le groupe du quartier).
+  Détails et démo : [memoire_postgresql.md](memoire_postgresql.md).
 - **Base de connaissances** : 24 documents fictifs de Rive-Claire (plan, refuges, crue de 2019, consignes). Deux sont
   volontairement **peu fiables** ou périmés, pour voir si les agents s'y laissent prendre.
 - **Recherche hybride** : mots-clés (TF-IDF) + embeddings (nomic-embed-text), combinés par RRF. Si les embeddings ne
   sont pas disponibles, la recherche reste lexicale.
-- `sim/eval_rag.py` mesure la qualité sur 13 questions étiquetées à la main. En mode lexical : recall@3 = 0,78,
-  hit@3 = 1,00, MRR = 0,92. Le mode hybride n'a pas pu être mesuré ici (pas d'Ollama réel, voir section 11).
+- `sim/eval_rag.py` mesure la qualité sur 13 questions étiquetées à la main, avec le vrai modèle d'embeddings :
+  mots seuls recall@3 = 0,76, MRR = 0,92 ; hybride recall@3 = 0,79, MRR = 0,96 (hit@3 = 1,00 dans les deux cas).
+- **Embeddings des souvenirs** : chaque souvenir a son vecteur, calculé en arrière-plan (un par contenu : un message relayé
+  n'est vectorisé qu'une fois, ce qui évite 60 à 65 % des calculs) et rangé dans `memoire.vecteur`. Le rappel ajoute
+  0,5 × la proximité de sens au score des mots (`rag_souvenirs_hybride`, réglable avec `SOUVENIR_SENS`).
+  `python eval_rag.py souvenirs` : sur 8 questions **reformulées** (69 cas), un souvenir pertinent est dans les 3 premiers
+  dans 90 % des cas (MRR 0,80), contre 17 % avec les mots seuls ; au-delà d'un poids de 1, la qualité baisse (0,78 avec 4).
 
 ## 5. Quel LLM choisir
 
@@ -193,6 +223,8 @@ La crue : le niveau monte de 0 m à 09:10 jusqu'au pic à 10:00 (0,32 m au-dessu
 | flux d'événements | Kafka, topic `alerte.events` (rétention 24 h) | transport en direct, plusieurs lecteurs |
 | commandes de Godot | Kafka, topic `alerte.commands` | même chemin que le reste, tracé |
 | événements non conformes | Kafka, topic `alerte.dlq` | on les garde pour diagnostiquer (F4) |
+| agrégats Spark par fenêtre | Kafka, topic `alerte.spark` | calculés en direct par Spark Structured Streaming ([spark.md](spark.md)) |
+| analyses de tous les runs | `data/spark/` (Parquet + `rapport_spark.md`) | produites par le job Spark batch, régénérables |
 | état courant du monde | en mémoire dans `sim` (et dernier `world.tick` gardé par la passerelle) | change toutes les 5 s, pas besoin de base |
 | historique des runs | `data/runs/<run_id>.jsonl`, un événement par ligne | simple, lisible, sert au rejeu (E3) et aux analyses (F5) |
 | mémoire des agents | en mémoire dans `sim`, et chaque souvenir est aussi dans les événements | visible dans l'inspecteur Godot (D2) |
